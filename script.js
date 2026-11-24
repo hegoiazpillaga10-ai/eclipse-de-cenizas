@@ -41,6 +41,8 @@ function startPlaying() {
 }
 function pause() {
   playing = false;
+  dragging = false;
+  if (document.pointerLockElement) document.exitPointerLock();
   for (const k in keys) keys[k] = false;
   $('hud').classList.add('hidden');
   $('story').classList.add('hidden');
@@ -72,6 +74,9 @@ function say(text) {
 
 // ---------- CONTROLES ----------
 const keys = {};
+let yaw = 0, pitch = 0.2; // ángulos de la cámara orbital
+let dragging = false, dragDist = 0;
+
 window.addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
   keys[k] = true;
@@ -80,7 +85,30 @@ window.addEventListener('keydown', e => {
   if (k === ' ' || k.startsWith('arrow')) e.preventDefault();
 });
 window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
-window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+window.addEventListener('blur', () => { for (const k in keys) keys[k] = false; dragging = false; });
+
+// Ratón: arrastrar, o clic para capturar el ratón (pointer lock)
+window.addEventListener('mousedown', e => {
+  if (playing && e.button === 0) { dragging = true; dragDist = 0; }
+});
+window.addEventListener('mouseup', () => { dragging = false; });
+window.addEventListener('mousemove', e => {
+  if (!playing) return;
+  const locked = document.pointerLockElement === $('game');
+  if (!locked && !dragging) return;
+  dragDist += Math.abs(e.movementX) + Math.abs(e.movementY);
+  yaw -= e.movementX * 0.004;
+  pitch += e.movementY * 0.004;
+  pitch = Math.max(0.05, Math.min(1.3, pitch));
+});
+$('game').addEventListener('click', () => {
+  if (!playing || dragDist > 4) return;
+  if (document.pointerLockElement === $('game')) return;
+  try {
+    const r = $('game').requestPointerLock();
+    if (r && r.catch) r.catch(() => {});
+  } catch (err) {}
+});
 
 // ---------- VARIABLES DEL MUNDO ----------
 let renderer, scene, camera, clock, knight, legL, legR, armL, armR;
@@ -89,14 +117,11 @@ let moonSprite, moonGlow, stars, moonTex;
 let time = 0, walkT = 0, walkAmp = 0, air = 0, knightYaw = Math.PI;
 let vy = 0, onGround = true, jumpSaid = false, moonSaid = false;
 const pos = new THREE.Vector3(0, 0, 0);
+const focus = new THREE.Vector3();
+let focusReady = false;
 const obstacles = [];
 const arches = [];
 const dummy = new THREE.Object3D();
-
-// Cámara fija (ángulo constante) que sigue suavemente
-const camPos = new THREE.Vector3(), look = new THREE.Vector3();
-const camTarget = new THREE.Vector3(), lookTarget = new THREE.Vector3();
-let camReady = false;
 
 // Aleatorio con semilla: el mapa es siempre el mismo
 let seed = 1337;
@@ -125,13 +150,19 @@ const zones = [
   { x: -32, z: 38, r: 15, seen: false, text: 'Columnas rotas de un templo olvidado. Aquí alguien rezó una última vez... y nadie respondió.' },
   { x: 40, z: 40, r: 15, seen: false, text: 'Cristales violetas palpitan en la oscuridad como corazones helados. El aire vibra con una magia antigua y hambrienta.' },
   { x: -62, z: 5, r: 16, seen: false, text: 'Monolitos retorcidos se inclinan hacia ti, como si la piedra se hubiera cansado de estar quieta. Cuanto más los miras, más parecen girar.' },
-  { x: 5, z: -62, r: 22, seen: false, text: 'Arcos de piedra flotan sobre tu cabeza, sin pilares, sin motivo. Ninguno lleva a ningún sitio... o quizá a todos.' },
+  { x: 0, z: 62, r: 24, seen: false, text: 'Arcos de piedra flotan sobre tu cabeza, sin pilares, sin motivo. Ninguno lleva a ningún sitio... o quizá a todos.' },
   { x: 62, z: 8, r: 16, seen: false, text: 'Una escalera asciende en espiral hacia la nada. El primer peldaño está demasiado alto. Nadie ha subido en siglos. O eso quieres creer.' }
 ];
 
 function scatter(cx, cz, radius) {
   const a = rnd() * 6.283, d = Math.sqrt(rnd()) * radius;
   return [cx + Math.cos(a) * d, cz + Math.sin(a) * d];
+}
+// Igual que scatter, pero solo devuelve puntos con z >= minZ (zona sur, lejos de la luna)
+function scatterIn(cx, cz, radius, minZ) {
+  let p;
+  do { p = scatter(cx, cz, radius); } while (p[1] < minZ);
+  return p;
 }
 
 function addObs(x, z, r, h) {
@@ -277,6 +308,7 @@ function buildWorld() {
   });
 
   // ===== ARQUITECTURA SURREALISTA =====
+  // (Todo lo alto y flotante está en el sur, para que la luna del norte quede despejada)
   const strange = new THREE.MeshLambertMaterial({ color: 0x4a4260, flatShading: true });
 
   // Monolitos retorcidos e inclinados
@@ -293,7 +325,7 @@ function buildWorld() {
   monoGeo.computeVertexNormals();
   const monos = [];
   for (let i = 0; i < 16; i++) {
-    const [x, z] = i < 11 ? scatter(-62, 5, 15) : scatter(0, 0, 80);
+    const [x, z] = i < 11 ? scatter(-62, 5, 15) : scatterIn(10, 55, 32, 30);
     if (Math.hypot(x, z) < 10) continue;
     monos.push([x, z, 7 + rnd() * 9]);
     addObs(x, z, 1.1, 99);
@@ -305,10 +337,10 @@ function buildWorld() {
     dummy.scale.set(1, h, 1);
   });
 
-  // Arcos flotantes (se mecen despacio)
+  // Arcos flotantes (se mecen despacio) - solo en el sur
   const archGeo = new THREE.TorusGeometry(4, 0.8, 5, 10, Math.PI);
   for (let i = 0; i < 8; i++) {
-    const [x, z] = i < 5 ? scatter(5, -62, 20) : scatter(0, 0, 75);
+    const [x, z] = scatterIn(0, 62, 26, 36);
     const m = new THREE.Mesh(archGeo, strange);
     m.scale.setScalar(0.8 + rnd() * 1.1);
     m.position.set(x, 7 + rnd() * 9, z);
@@ -317,17 +349,17 @@ function buildWorld() {
     arches.push({ m, y: m.position.y, ph: rnd() * 6.28, ry: m.rotation.y });
   }
 
-  // Rocas invertidas colgando en el aire
+  // Rocas invertidas colgando en el aire - solo en el sur
   const coneGeo = new THREE.ConeGeometry(1, 1, 6); coneGeo.rotateX(Math.PI);
   addInstanced(coneGeo, new THREE.MeshLambertMaterial({ color: 0x2c2838, flatShading: true }), 9, () => {
-    const [x, z] = scatter(0, 0, 80);
+    const [x, z] = scatterIn(0, 60, 30, 32);
     const s = 2 + rnd() * 3;
     dummy.position.set(x, 14 + rnd() * 14, z);
     dummy.rotation.y = rnd() * 6.28;
     dummy.scale.set(s, s * 1.8, s);
   });
 
-  // Escalera en espiral que sube a la nada (con un arco al final)
+  // Escalera en espiral que sube a la nada (con un arco al final), en el este
   const CX = 62, CZ = 8, R = 6, STEPS = 16;
   addInstanced(new THREE.BoxGeometry(3.2, 0.5, 1.6), strange, STEPS, i => {
     const a = i * 0.38;
@@ -341,25 +373,25 @@ function buildWorld() {
   gate.rotation.y = -la;
   scene.add(gate);
 
-  // ===== LUNA CON CARA =====
+  // ===== MEDIA LUNA CON CARA =====
   const mc = document.createElement('canvas');
   mc.width = mc.height = 256;
   moonTex = new THREE.CanvasTexture(mc);
   moonTex.userData = { c: mc.getContext('2d') };
-  drawMoon(1, -0.75, 0.9);
-  moonSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: moonTex, fog: false, transparent: true, depthWrite: false }));
+  drawMoon(1, -0.6, 0.9);
+  moonSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: moonTex, fog: false, transparent: true, depthWrite: false, rotation: 0.3 }));
   moonSprite.scale.set(46, 46, 1);
   moonSprite.renderOrder = 2;
 
   const gc = document.createElement('canvas');
   gc.width = gc.height = 128;
   const g2 = gc.getContext('2d');
-  const gr = g2.createRadialGradient(64, 64, 20, 64, 64, 64);
-  gr.addColorStop(0, 'rgba(190,150,255,0.55)');
-  gr.addColorStop(1, 'rgba(190,150,255,0)');
+  const gr = g2.createRadialGradient(64, 64, 14, 64, 64, 64);
+  gr.addColorStop(0, 'rgba(190,170,255,0.4)');
+  gr.addColorStop(1, 'rgba(190,170,255,0)');
   g2.fillStyle = gr; g2.fillRect(0, 0, 128, 128);
   moonGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(gc), fog: false, transparent: true, depthWrite: false }));
-  moonGlow.scale.set(105, 105, 1);
+  moonGlow.scale.set(100, 100, 1);
   moonGlow.renderOrder = 1;
   scene.add(moonGlow, moonSprite);
 
@@ -375,55 +407,95 @@ function buildWorld() {
   scene.add(stars);
 }
 
-// Dibuja la cara de la luna: open = 1 (ojos abiertos) a 0 (cerrados); px/py = hacia dónde miran
+// Dibuja la media luna: open = 1 (ojos abiertos) a 0 (cerrados); px/py = hacia dónde miran
 function drawMoon(open, px, py) {
   const c = moonTex.userData.c;
+  c.setTransform(1, 0, 0, 1, 0, 0);
+  c.globalCompositeOperation = 'source-over';
+  c.shadowBlur = 0;
   c.clearRect(0, 0, 256, 256);
 
-  const g = c.createRadialGradient(110, 100, 10, 128, 128, 122);
-  g.addColorStop(0, '#f4eeff'); g.addColorStop(0.7, '#cdbcf2'); g.addColorStop(1, '#9d86d6');
+  // Disco base pálido
+  const g = c.createRadialGradient(110, 175, 10, 128, 150, 125);
+  g.addColorStop(0, '#f6f3ff'); g.addColorStop(0.65, '#cfc6ee'); g.addColorStop(1, '#8f84c4');
   c.fillStyle = g;
   c.beginPath(); c.arc(128, 128, 122, 0, Math.PI * 2); c.fill();
 
-  c.fillStyle = 'rgba(90,60,140,0.22)';
-  [[60, 70, 16], [190, 80, 12], [205, 170, 18], [70, 195, 13], [150, 38, 8], [38, 140, 9]].forEach(([x, y, r]) => {
+  // Cráteres
+  c.fillStyle = 'rgba(80,70,130,0.22)';
+  [[40, 176, 10], [216, 178, 12], [60, 226, 8], [198, 228, 8], [30, 130, 7]].forEach(([x, y, r]) => {
     c.beginPath(); c.arc(x, y, r, 0, 6.283); c.fill();
   });
 
-  // Cejas enfadadas
-  c.strokeStyle = '#1a0830'; c.lineWidth = 7; c.lineCap = 'round';
-  c.beginPath(); c.moveTo(76, 76); c.lineTo(116, 94); c.stroke();
-  c.beginPath(); c.moveTo(180, 76); c.lineTo(140, 94); c.stroke();
+  // Recorte: queda una media luna con los cuernos hacia arriba
+  c.globalCompositeOperation = 'destination-out';
+  c.beginPath(); c.arc(128, 44, 108, 0, 6.283); c.fill();
 
-  // Ojos
-  for (const ex of [88, 168]) {
-    c.fillStyle = '#14041f';
-    c.beginPath(); c.ellipse(ex, 112, 25, 18, 0, 0, 6.283); c.fill();
-    const ry = 15 * open;
+  // Borde plateado en el filo interior (solo sobre lo ya dibujado)
+  c.globalCompositeOperation = 'source-atop';
+  c.strokeStyle = 'rgba(210,222,255,0.7)'; c.lineWidth = 4;
+  c.beginPath(); c.arc(128, 44, 108, 0, 6.283); c.stroke();
+  c.globalCompositeOperation = 'source-over';
+
+  // Cejas enfadadas
+  c.strokeStyle = '#1a0830'; c.lineWidth = 6; c.lineCap = 'round';
+  c.beginPath(); c.moveTo(64, 152); c.lineTo(104, 165); c.stroke();
+  c.beginPath(); c.moveTo(192, 152); c.lineTo(152, 165); c.stroke();
+
+  // Ojos plateados brillantes
+  for (const ex of [82, 174]) {
+    c.fillStyle = '#0c0318';
+    c.beginPath(); c.ellipse(ex, 180, 24, 15, 0, 0, 6.283); c.fill();
+    const ry = 12 * open;
     if (ry > 1) {
+      // halo
       c.save();
-      c.beginPath(); c.ellipse(ex, 112, 20, ry, 0, 0, 6.283); c.clip();
-      c.fillStyle = '#fff3b0'; c.fillRect(ex - 22, 90, 44, 44);
+      c.shadowColor = '#c8dcff'; c.shadowBlur = 18;
+      c.fillStyle = '#e6eeff';
+      c.beginPath(); c.ellipse(ex, 180, 19, ry, 0, 0, 6.283); c.fill();
+      c.restore();
+      // metal
+      c.save();
+      c.beginPath(); c.ellipse(ex, 180, 19, ry, 0, 0, 6.283); c.clip();
+      const mg = c.createLinearGradient(ex - 20, 180 - ry, ex + 20, 180 + ry);
+      mg.addColorStop(0, '#ffffff'); mg.addColorStop(0.45, '#b4c0da');
+      mg.addColorStop(0.6, '#f4f8ff'); mg.addColorStop(1, '#8c9dbf');
+      c.fillStyle = mg; c.fillRect(ex - 22, 180 - 14, 44, 28);
       c.fillStyle = '#0a0010';
-      c.beginPath(); c.ellipse(ex + px * 8, 112 + py * 6, 5, 9, 0, 0, 6.283); c.fill();
+      c.beginPath(); c.ellipse(ex + px * 7, 180 + py * 4, 3.5, 9, 0, 0, 6.283); c.fill();
       c.restore();
     }
   }
 
-  // Boca con dientes
-  c.fillStyle = '#14041f';
+  // Boca sonriente
+  c.fillStyle = '#12031d';
   c.beginPath();
-  c.moveTo(78, 172);
-  c.quadraticCurveTo(128, 222, 178, 172);
-  c.quadraticCurveTo(128, 188, 78, 172);
+  c.moveTo(80, 200);
+  c.quadraticCurveTo(128, 224, 176, 200);
+  c.quadraticCurveTo(128, 270, 80, 200);
   c.fill();
-  c.fillStyle = '#fff3b0';
-  for (let i = 1; i < 7; i++) {
-    const t = i / 7, u = 1 - t;
-    const x = u * u * 78 + 2 * u * t * 128 + t * t * 178;
-    const y = u * u * 172 + 2 * u * t * 188 + t * t * 172;
-    c.beginPath(); c.moveTo(x - 4, y); c.lineTo(x + 4, y); c.lineTo(x, y + 6); c.fill();
+
+  // Dientes afilados plateados (arriba y abajo)
+  c.save();
+  c.shadowColor = '#c8dcff'; c.shadowBlur = 8;
+  const tg = c.createLinearGradient(0, 200, 0, 240);
+  tg.addColorStop(0, '#ffffff'); tg.addColorStop(1, '#9fb0cc');
+  c.fillStyle = tg;
+  c.beginPath();
+  const n = 9;
+  for (let k = 0; k < n; k++) {
+    const t = (k + 1) / (n + 1);
+    const x = 80 + 96 * t, y = 200 + 48 * t * (1 - t), h = 6 + 8 * Math.sin(Math.PI * t);
+    c.moveTo(x - 4, y); c.lineTo(x + 4, y); c.lineTo(x, y + h);
   }
+  for (let k = 0; k < n - 1; k++) {
+    const t = (k + 1.5) / (n + 1);
+    const x = 80 + 96 * t, y = 200 + 140 * t * (1 - t), h = 5 + 6 * Math.sin(Math.PI * t);
+    c.moveTo(x - 4, y); c.lineTo(x + 4, y); c.lineTo(x, y - h);
+  }
+  c.fill();
+  c.restore();
+
   moonTex.needsUpdate = true;
 }
 
@@ -442,9 +514,10 @@ function updateMoon(dt) {
     }
   }
   const o = Math.round(moonOpen * 5) / 5;
-  const px = Math.round((-0.75 + Math.sin(time * 0.3) * 0.5) * 4) / 4; // mira hacia abajo y a la izquierda (hacia el mapa)
+  const px = Math.round((-0.6 + Math.sin(time * 0.3) * 0.4) * 4) / 4; // mira hacia abajo, hacia el mapa
   const key = o + '|' + px;
   if (key !== moonKey) { moonKey = key; drawMoon(o, px, 0.9); }
+  moonGlow.material.opacity = 0.8 + 0.2 * Math.sin(time * 1.3);
 }
 
 function makeKnight() {
@@ -537,9 +610,9 @@ function updateSky() {
   hemi.color.copy(skyColor).offsetHSL(0, 0.1, 0.18);
   stars.material.opacity = 0.65 + 0.35 * Math.sin(time * 0.6);
   stars.position.copy(camera.position);
-  // La luna está siempre en el mismo sitio de la pantalla, vigilando el mapa
-  moonSprite.position.set(camera.position.x + 28, camera.position.y + 36, camera.position.z - 170);
-  moonGlow.position.set(camera.position.x + 28, camera.position.y + 36, camera.position.z - 172);
+  // La luna está fija en el cielo del norte (no gira con la cámara)
+  moonSprite.position.set(camera.position.x + 28, camera.position.y + 52, camera.position.z - 170);
+  moonGlow.position.set(camera.position.x + 28, camera.position.y + 52, camera.position.z - 172);
 }
 
 function updateArches() {
@@ -551,10 +624,18 @@ function updateArches() {
 
 // ---------- ACTUALIZAR CADA FRAME ----------
 function update(dt) {
-  // Cámara con ángulo fijo: W = hacia el fondo, S = hacia ti, A = izquierda, D = derecha
-  const ix = ((keys['d'] || keys['arrowright']) ? 1 : 0) - ((keys['a'] || keys['arrowleft']) ? 1 : 0);
-  const iz = ((keys['w'] || keys['arrowup']) ? 1 : 0) - ((keys['s'] || keys['arrowdown']) ? 1 : 0);
-  const mx = ix, mz = -iz;
+  // Girar cámara con teclado (Q/E o flechas)
+  yaw += (((keys['arrowleft'] || keys['q']) ? 1 : 0) - ((keys['arrowright'] || keys['e']) ? 1 : 0)) * 2 * dt;
+  pitch += ((keys['arrowdown'] ? 1 : 0) - (keys['arrowup'] ? 1 : 0)) * 1.2 * dt;
+  pitch = Math.max(0.05, Math.min(1.3, pitch));
+
+  // Movimiento relativo a la cámara
+  const cy_ = Math.cos(yaw), sy_ = Math.sin(yaw);
+  const fx = -sy_, fz = -cy_;   // hacia donde mira la cámara
+  const rx = cy_, rz = -sy_;    // derecha de la cámara
+  const ix = (keys['d'] ? 1 : 0) - (keys['a'] ? 1 : 0);
+  const iz = (keys['w'] ? 1 : 0) - (keys['s'] ? 1 : 0);
+  const mx = fx * iz + rx * ix, mz = fz * iz + rz * ix;
   const moving = ix !== 0 || iz !== 0;
   const speed = keys['shift'] ? 9 : 5;
 
@@ -603,16 +684,16 @@ function update(dt) {
   knight.position.set(pos.x, pos.y + Math.abs(Math.sin(walkT)) * 0.08 * w, pos.z);
   knight.rotation.y = knightYaw;
 
-  // Cámara: detrás y arriba, ángulo fijo, seguimiento suave
-  camTarget.set(pos.x, pos.y + 5.2, pos.z + 11);
-  lookTarget.set(pos.x, pos.y + 2.5, pos.z - 3);
-  if (!camReady) { camPos.copy(camTarget); look.copy(lookTarget); camReady = true; }
-  const k = 1 - Math.exp(-dt * 3.5);
-  camPos.lerp(camTarget, k);
-  look.lerp(lookTarget, k);
-  camPos.y = Math.max(camPos.y, heightAt(camPos.x, camPos.z) + 1.2);
-  camera.position.copy(camPos);
-  camera.lookAt(look);
+  // Cámara orbital: sigue al caballero con suavidad y gira según yaw/pitch
+  if (!focusReady) { focus.copy(pos); focusReady = true; }
+  focus.lerp(pos, 1 - Math.exp(-dt * 7));
+  const dist = 9, cp = Math.cos(pitch);
+  const cx = focus.x + Math.sin(yaw) * cp * dist;
+  const cz = focus.z + Math.cos(yaw) * cp * dist;
+  let cy = focus.y + 2 + Math.sin(pitch) * dist;
+  cy = Math.max(cy, heightAt(cx, cz) + 0.8);
+  camera.position.set(cx, cy, cz);
+  camera.lookAt(focus.x, focus.y + 2.8, focus.z);
 
   // Luces que siguen al caballero
   torch.position.set(pos.x, pos.y + 2.5, pos.z);
@@ -630,7 +711,7 @@ function update(dt) {
 
   if (!moonSaid && time > 40) {
     moonSaid = true;
-    say('Alzas la vista. La luna tiene ojos. Juraría que acaba de parpadear.');
+    say('Alzas la vista hacia el norte. Una luna rota te sonríe con dientes de plata. Juraría que acaba de parpadear.');
   }
 }
 
