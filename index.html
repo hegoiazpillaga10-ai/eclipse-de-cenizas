@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Eclipse de Cenizas</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <canvas id="game"></canvas>
+
+  <div id="intro" class="screen">
+    <p class="line l1">El sol se apagó para siempre...</p>
+    <p class="line l2">Los reinos cayeron. La oscuridad despertó.</p>
+    <h1 class="line l3">ECLIPSE DE CENIZAS</h1>
+    <p class="skip">Pulsa para saltar</p>
+  </div>
+
+  <div id="menu" class="screen hidden">
+    <h1 class="title">ECLIPSE DE CENIZAS</h1>
+    <button id="btnPlay">Jugar</button>
+    <button id="btnOptions">Opciones</button>
+  </div>
+
+  <div id="options" class="screen hidden">
+    <h2 class="title2">Opciones</h2>
+    <p>Calidad gráfica (baja = menos lag)</p>
+    <div class="row">
+      <button id="qLow">Baja</button>
+      <button id="qMid" class="active">Media</button>
+    </div>
+    <button id="btnBack">Volver</button>
+  </div>
+
+  <div id="hud" class="hidden">
+    WASD o flechas: moverse · Shift: correr · Espacio: saltar<br>
+    Esc o P: menú
+  </div>
+
+  <div id="story" class="hidden">
+    <div class="who">Narrador</div>
+    <p id="storyText"></p>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="script.js"></script>
+</body>
+</html>
