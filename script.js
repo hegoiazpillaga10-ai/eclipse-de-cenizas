@@ -9,10 +9,41 @@ function show(id) {
 const settings = { quality: 'mid' };
 let playing = false, started = false, introDone = false;
 
-function endIntro() { if (introDone) return; introDone = true; show('menu'); }
-setTimeout(endIntro, 9000);
+// Secuencia: cartel (splash) -> intro de historia -> menú
+// Pon SKIP_STORY_INTRO = true si quieres que el cartel pase directo al menú.
+const SKIP_STORY_INTRO = false;
+let stage = 'splash';
+let introTimer = null;
+
+function endSplash() {
+  if (stage !== 'splash') return;
+  const sp = $('splash');
+  if (SKIP_STORY_INTRO) {
+    introDone = true;
+    stage = 'menu';
+    show('menu');
+  } else {
+    stage = 'intro';
+    show('intro');                       // la intro arranca justo debajo del cartel
+    introTimer = setTimeout(endIntro, 9000);
+  }
+  sp.classList.add('fadeout');           // el cartel se desvanece suavemente
+  setTimeout(() => sp.classList.add('hidden'), 1300);
+}
+function endIntro() {
+  if (introDone) return;
+  introDone = true;
+  stage = 'menu';
+  clearTimeout(introTimer);
+  show('menu');
+}
+setTimeout(endSplash, 4500);
+$('splash').addEventListener('click', endSplash);
 $('intro').addEventListener('click', endIntro);
-window.addEventListener('keydown', () => { if (!introDone) endIntro(); });
+window.addEventListener('keydown', () => {
+  if (stage === 'splash') endSplash();
+  else if (stage === 'intro') endIntro();
+});
 
 function updateUI() {
   $('qLow').classList.toggle('active', settings.quality === 'low');
