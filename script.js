@@ -1,49 +1,39 @@
 const $ = id => document.getElementById(id);
 
 // ---------- PANTALLAS ----------
-const screens = ['intro', 'menu', 'options'];
+const screens = ['menu', 'options'];
 function show(id) {
-  screens.forEach(s => $(s).classList.add('hidden'));
-  if (id) $(id).classList.remove('hidden');
+  screens.forEach(s => {
+    const el = $(s);
+    el.classList.add('hidden');
+    el.style.display = 'none';
+  });
+  if (id) {
+    const el = $(id);
+    el.classList.remove('hidden');
+    el.style.display = '';
+  }
 }
 const settings = { quality: 'mid' };
-let playing = false, started = false, introDone = false;
+let playing = false, started = false;
 
-// Secuencia: cartel (splash) -> intro de historia -> menú
-// Pon SKIP_STORY_INTRO = true si quieres que el cartel pase directo al menú.
-const SKIP_STORY_INTRO = false;
+// Secuencia: cartel AyuCreations -> menú principal
 let stage = 'splash';
-let introTimer = null;
-
 function endSplash() {
   if (stage !== 'splash') return;
-  const sp = $('splash');
-  if (SKIP_STORY_INTRO) {
-    introDone = true;
-    stage = 'menu';
-    show('menu');
-  } else {
-    stage = 'intro';
-    show('intro');                       // la intro arranca justo debajo del cartel
-    introTimer = setTimeout(endIntro, 9000);
-  }
-  sp.classList.add('fadeout');           // el cartel se desvanece suavemente
-  setTimeout(() => sp.classList.add('hidden'), 1300);
-}
-function endIntro() {
-  if (introDone) return;
-  introDone = true;
   stage = 'menu';
-  clearTimeout(introTimer);
-  show('menu');
+  const sp = $('splash');
+  sp.classList.add('fadeout'); // se desvanece suavemente
+  setTimeout(() => {
+    sp.classList.add('hidden');
+    sp.style.display = 'none';
+    show('menu');
+    $('btnMusic').classList.remove('hidden');
+  }, 900);
 }
-setTimeout(endSplash, 4500);
+setTimeout(endSplash, 3500);
 $('splash').addEventListener('click', endSplash);
-$('intro').addEventListener('click', endIntro);
-window.addEventListener('keydown', () => {
-  if (stage === 'splash') endSplash();
-  else if (stage === 'intro') endIntro();
-});
+window.addEventListener('keydown', () => { if (stage === 'splash') endSplash(); });
 
 function updateUI() {
   $('qLow').classList.toggle('active', settings.quality === 'low');
@@ -55,15 +45,22 @@ function applyQuality() {
   renderer.setSize(window.innerWidth, window.innerHeight);
   if (grass) grass.count = settings.quality === 'low' ? 1000 : 2400;
 }
+
+let musicAutoStarted = false;
 function startPlaying() {
   show(null);
   if (document.activeElement) document.activeElement.blur();
   $('hud').classList.remove('hidden');
   $('story').classList.remove('hidden');
+  if (quest > 0) $('quest').classList.remove('hidden');
+
+  // La música arranca en el momento exacto de pulsar Jugar (la primera vez)
+  if (!musicAutoStarted) { musicAutoStarted = true; setMusic(true); }
+
   if (!started) {
     initGame();
     started = true;
-    say('Despiertas entre cenizas frías. El aire huele a hierro y a tumba. Un caballero sin nombre... eres tú. Camina.');
+    say('Despiertas entre cenizas frías. El aire huele a hierro y a tumba. Al norte, un farol naranja arde junto a una figura encapuchada. Camina.');
   }
   applyQuality();
   playing = true;
@@ -73,10 +70,13 @@ function startPlaying() {
 function pause() {
   playing = false;
   dragging = false;
+  closeDialogue(false);
   if (document.pointerLockElement) document.exitPointerLock();
   for (const k in keys) keys[k] = false;
   $('hud').classList.add('hidden');
   $('story').classList.add('hidden');
+  $('quest').classList.add('hidden');
+  $('prompt').classList.add('hidden');
   show('menu');
 }
 $('btnPlay').onclick = startPlaying;
@@ -85,22 +85,178 @@ $('btnBack').onclick = () => show('menu');
 $('qLow').onclick = () => { settings.quality = 'low'; updateUI(); applyQuality(); };
 $('qMid').onclick = () => { settings.quality = 'mid'; updateUI(); applyQuality(); };
 
+// =====================================================
+//  MÚSICA DARK FANTASY (Web Audio API, sin archivos)
+// =====================================================
+let actx = null, master = null, bus = null, musicOn = false, musicTimer = null;
+let drone1 = null, drone2 = null;
+let trackIdx = 0, chordIdx = 0, nextChordT = 0, nextBellT = 0;
+const MUSIC_VOL = 0.5;
+const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
+
+// Playlist: cada tema tiene tonalidad, acordes (en semitonos desde la raíz) y escala para las campanas
+const tracks = [
+  { name: 'Cenizas Frías',     root: 38, chordLen: 9,  chords: [[0, 3, 7], [-4, 0, 3], [-2, 2, 5], [-5, -2, 2]], scale: [0, 3, 5, 7, 10, 12, 15] },
+  { name: 'Réquiem de Niebla', root: 33, chordLen: 10, chords: [[0, 3, 7], [1, 5, 8], [-2, 2, 5], [-4, 0, 3]],   scale: [0, 1, 3, 7, 8, 12, 13] },
+  { name: 'Eclipse',           root: 36, chordLen: 8,  chords: [[0, 3, 7], [-2, 2, 5], [3, 7, 10], [-4, 0, 3]], scale: [0, 2, 3, 7, 8, 12, 14] }
+];
+
+function initAudio() {
+  if (actx) return;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  actx = new AC();
+
+  const comp = actx.createDynamicsCompressor();
+  master = actx.createGain(); master.gain.value = 0;
+  master.connect(comp); comp.connect(actx.destination);
+  bus = actx.createGain(); bus.connect(master);
+
+  // Reverb generada con ruido que se apaga (sensación de catedral)
+  const len = Math.floor(actx.sampleRate * 3.5);
+  const ir = actx.createBuffer(2, len, actx.sampleRate);
+  for (let c = 0; c < 2; c++) {
+    const d = ir.getChannelData(c);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.6);
+  }
+  const conv = actx.createConvolver(); conv.buffer = ir;
+  const wet = actx.createGain(); wet.gain.value = 0.7;
+  bus.connect(conv); conv.connect(wet); wet.connect(master);
+
+  // Drone grave que respira (dos dientes de sierra desafinados + filtro con LFO lento)
+  const filt = actx.createBiquadFilter();
+  filt.type = 'lowpass'; filt.frequency.value = 330; filt.Q.value = 4;
+  const dg = actx.createGain(); dg.gain.value = 0.15;
+  drone1 = actx.createOscillator(); drone1.type = 'sawtooth';
+  drone2 = actx.createOscillator(); drone2.type = 'sawtooth'; drone2.detune.value = 9;
+  drone1.frequency.value = mtof(tracks[0].root);
+  drone2.frequency.value = mtof(tracks[0].root + 12);
+  drone1.connect(filt); drone2.connect(filt); filt.connect(dg); dg.connect(bus);
+  const lfo = actx.createOscillator(); lfo.frequency.value = 0.07;
+  const lg = actx.createGain(); lg.gain.value = 130;
+  lfo.connect(lg); lg.connect(filt.frequency);
+  drone1.start(); drone2.start(); lfo.start();
+
+  nextChordT = actx.currentTime + 0.2;
+  nextBellT = actx.currentTime + 3;
+}
+
+function playChord(t, chord, len, tr) {
+  for (const iv of chord) {
+    for (const [type, det] of [['triangle', -6], ['sine', 7]]) {
+      const o = actx.createOscillator(); o.type = type; o.detune.value = det;
+      o.frequency.value = mtof(tr.root + 12 + iv);
+      const f = actx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 900;
+      const g = actx.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.linearRampToValueAtTime(0.045, t + len * 0.4);
+      g.gain.linearRampToValueAtTime(0.0001, t + len + 2);
+      o.connect(f); f.connect(g); g.connect(bus);
+      o.start(t); o.stop(t + len + 2.2);
+    }
+  }
+}
+function bell(t) {
+  const tr = tracks[trackIdx];
+  const note = tr.root + 24 + tr.scale[Math.floor(Math.random() * tr.scale.length)] + (Math.random() < 0.3 ? 12 : 0);
+  for (const [m, v] of [[1, 0.05], [2.76, 0.02], [5.4, 0.008]]) {
+    const o = actx.createOscillator(); o.type = 'sine'; o.frequency.value = mtof(note) * m;
+    const g = actx.createGain();
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(v, t + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 5);
+    o.connect(g); g.connect(bus);
+    o.start(t); o.stop(t + 5.2);
+  }
+}
+function boom(t) {
+  const o = actx.createOscillator(); o.type = 'sine';
+  o.frequency.setValueAtTime(75, t);
+  o.frequency.exponentialRampToValueAtTime(34, t + 1.5);
+  const g = actx.createGain();
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(0.3, t + 0.05);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + 3);
+  o.connect(g); g.connect(bus);
+  o.start(t); o.stop(t + 3.2);
+}
+
+function scheduleMusic() {
+  if (!actx || !musicOn) return;
+  const now = actx.currentTime;
+  while (nextChordT < now + 2.5) {
+    const tr = tracks[trackIdx];
+    const ch = tr.chords[chordIdx % tr.chords.length];
+    playChord(nextChordT, ch, tr.chordLen, tr);
+    const bass = tr.root + Math.min(...ch);
+    drone1.frequency.setTargetAtTime(mtof(bass), nextChordT, 1.5);
+    drone2.frequency.setTargetAtTime(mtof(bass + 12), nextChordT, 1.5);
+    if (chordIdx % 2 === 0 && Math.random() < 0.8) boom(nextChordT);
+    nextChordT += tr.chordLen;
+    chordIdx++;
+    if (chordIdx >= tr.chords.length * 3) { chordIdx = 0; trackIdx = (trackIdx + 1) % tracks.length; } // siguiente tema
+  }
+  while (nextBellT < now + 2.5) {
+    if (Math.random() < 0.75) bell(nextBellT);
+    nextBellT += 2.5 + Math.random() * 5;
+  }
+}
+
+function setMusic(on) {
+  musicOn = on;
+  $('btnMusic').textContent = '🎵 Música: ' + (on ? 'ON' : 'OFF');
+  if (on) {
+    initAudio();
+    if (!actx) return;
+    actx.resume();
+    if (!musicTimer) {
+      nextChordT = Math.max(nextChordT, actx.currentTime + 0.2);
+      nextBellT = Math.max(nextBellT, actx.currentTime + 3);
+      scheduleMusic();
+      musicTimer = setInterval(scheduleMusic, 400);
+    }
+    master.gain.cancelScheduledValues(actx.currentTime);
+    master.gain.setTargetAtTime(MUSIC_VOL, actx.currentTime, 0.8);
+  } else {
+    if (actx) {
+      master.gain.cancelScheduledValues(actx.currentTime);
+      master.gain.setTargetAtTime(0, actx.currentTime, 0.2);
+      setTimeout(() => { if (!musicOn && actx) actx.suspend(); }, 900);
+    }
+    clearInterval(musicTimer); musicTimer = null;
+  }
+}
+$('btnMusic').onclick = () => {
+  musicAutoStarted = true;
+  setMusic(!musicOn);
+  $('btnMusic').blur();
+};
+
 // ---------- CUADRO DE TEXTO (estilo aventura) ----------
-let typeTimer = null, fadeTimer = null;
-function say(text) {
+let typeTimer = null, fadeTimer = null, typing = false, fullText = '';
+function say(text, who = 'Narrador', keep = false) {
   clearInterval(typeTimer);
   clearTimeout(fadeTimer);
   const el = $('storyText');
+  $('storyWho').textContent = who;
   $('story').classList.remove('faded');
   el.textContent = '';
+  fullText = text;
+  typing = true;
   let i = 0;
   typeTimer = setInterval(() => {
     el.textContent = text.slice(0, ++i);
     if (i >= text.length) {
       clearInterval(typeTimer);
-      fadeTimer = setTimeout(() => $('story').classList.add('faded'), 9000);
+      typing = false;
+      if (!keep) fadeTimer = setTimeout(() => $('story').classList.add('faded'), 9000);
     }
   }, 28);
+}
+function finishTyping() {
+  clearInterval(typeTimer);
+  typing = false;
+  $('storyText').textContent = fullText;
 }
 
 // ---------- CONTROLES ----------
@@ -113,6 +269,7 @@ window.addEventListener('keydown', e => {
   keys[k] = true;
   if (!playing) return;
   if (k === 'escape' || k === 'p') pause();
+  if (k === 'e' && !e.repeat) interact();
   if (k === ' ' || k.startsWith('arrow')) e.preventDefault();
 });
 window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
@@ -153,6 +310,13 @@ let focusReady = false;
 const obstacles = [];
 const arches = [];
 const dummy = new THREE.Object3D();
+
+// Misión y NPCs
+let quest = 0;        // 0 = sin aceptar, 1 = en curso, 2 = fragmentos listos, 3 = completada
+let frags = 0;
+const fragments = [];
+const npcs = [];
+let nearNpc = null, dlg = null;
 
 // Aleatorio con semilla: el mapa es siempre el mismo
 let seed = 1337;
@@ -599,6 +763,233 @@ function makeKnight() {
   return g;
 }
 
+// =====================================================
+//  NPCs LOW-POLY
+// =====================================================
+function lam(c) { return new THREE.MeshLambertMaterial({ color: c, flatShading: true }); }
+function bas(c) { return new THREE.MeshBasicMaterial({ color: c }); }
+function part(geo, mat, x, y, z, parent) {
+  const m = new THREE.Mesh(geo, mat);
+  m.position.set(x, y, z);
+  parent.add(m);
+  return m;
+}
+
+// Aldeano encapuchado con farol
+function makeVillager() {
+  const g = new THREE.Group();
+  const cloak = lam(0x3a3148), dark = lam(0x0c0910), wood = lam(0x4a3220);
+  part(new THREE.CylinderGeometry(0.3, 0.85, 1.7, 7), cloak, 0, 0.85, 0, g);      // túnica
+  part(new THREE.SphereGeometry(0.33, 7, 6), cloak, 0, 1.85, 0, g);               // cabeza
+  const hood = part(new THREE.ConeGeometry(0.46, 0.9, 7), cloak, 0, 2.2, -0.05, g); // capucha
+  hood.rotation.x = -0.25;
+  part(new THREE.SphereGeometry(0.25, 7, 6), dark, 0, 1.82, 0.14, g);             // rostro en sombra
+  part(new THREE.SphereGeometry(0.045, 5, 4), bas(0xffe2b0), -0.1, 1.86, 0.36, g); // ojos
+  part(new THREE.SphereGeometry(0.045, 5, 4), bas(0xffe2b0), 0.1, 1.86, 0.36, g);
+  part(new THREE.BoxGeometry(0.2, 0.8, 0.22), cloak, -0.5, 1.2, 0.05, g);        // brazos
+  part(new THREE.BoxGeometry(0.2, 0.8, 0.22), cloak, 0.5, 1.25, 0.15, g);
+  part(new THREE.CylinderGeometry(0.045, 0.045, 2.6, 5), wood, 0.62, 1.3, 0.3, g); // bastón
+  part(new THREE.SphereGeometry(0.14, 6, 5), bas(0xff9a3c), 0.62, 2.6, 0.3, g);   // farol
+  return g;
+}
+
+// Gnomo con gorro puntiagudo
+function makeGnome() {
+  const g = new THREE.Group();
+  const blue = lam(0x2f4f8a), skin = lam(0xe0a98a), nose = lam(0xd6806a);
+  const white = lam(0xe8e4dc), red = lam(0xa8141e), brown = lam(0x3a2414);
+  part(new THREE.CylinderGeometry(0.32, 0.5, 0.9, 7), blue, 0, 0.55, 0, g);       // cuerpo
+  part(new THREE.BoxGeometry(0.26, 0.2, 0.4), brown, -0.18, 0.1, 0.08, g);        // botas
+  part(new THREE.BoxGeometry(0.26, 0.2, 0.4), brown, 0.18, 0.1, 0.08, g);
+  part(new THREE.CylinderGeometry(0.4, 0.4, 0.1, 7), brown, 0, 0.62, 0, g);       // cinturón
+  part(new THREE.SphereGeometry(0.3, 7, 6), skin, 0, 1.25, 0, g);                 // cabeza
+  part(new THREE.SphereGeometry(0.11, 6, 5), nose, 0, 1.2, 0.3, g);               // nariz
+  part(new THREE.SphereGeometry(0.04, 5, 4), bas(0x000000), -0.11, 1.32, 0.26, g);
+  part(new THREE.SphereGeometry(0.04, 5, 4), bas(0x000000), 0.11, 1.32, 0.26, g);
+  const beard = part(new THREE.ConeGeometry(0.26, 0.65, 6), white, 0, 0.95, 0.18, g); // barba
+  beard.rotation.x = Math.PI;
+  part(new THREE.CylinderGeometry(0.44, 0.44, 0.05, 8), red, 0, 1.48, 0, g);      // ala del gorro
+  const hat = part(new THREE.ConeGeometry(0.34, 1.0, 6), red, 0, 1.97, 0, g);     // gorro
+  hat.rotation.z = 0.22;
+  part(new THREE.BoxGeometry(0.14, 0.5, 0.16), blue, -0.42, 0.75, 0.05, g);       // brazos
+  part(new THREE.BoxGeometry(0.14, 0.5, 0.16), blue, 0.42, 0.75, 0.05, g);
+  g.scale.setScalar(0.72);
+  return g;
+}
+
+// Duende de orejas largas
+function makeGoblin() {
+  const g = new THREE.Group();
+  const green = lam(0x5d8f37), rag = lam(0x4a3524), steelM = lam(0x9aa0a8);
+  const body = part(new THREE.CylinderGeometry(0.3, 0.42, 0.95, 6), rag, 0, 0.8, 0, g); // harapos
+  body.rotation.x = 0.15;
+  part(new THREE.BoxGeometry(0.14, 0.5, 0.14), green, -0.15, 0.25, 0, g);         // piernas
+  part(new THREE.BoxGeometry(0.14, 0.5, 0.14), green, 0.15, 0.25, 0, g);
+  const head = part(new THREE.SphereGeometry(0.4, 7, 6), green, 0, 1.5, 0.05, g); // cabeza
+  head.scale.set(1.1, 0.95, 1);
+  const earL = part(new THREE.ConeGeometry(0.13, 0.7, 4), green, -0.52, 1.6, 0, g); // orejas
+  earL.rotation.z = 1.2;
+  const earR = part(new THREE.ConeGeometry(0.13, 0.7, 4), green, 0.52, 1.6, 0, g);
+  earR.rotation.z = -1.2;
+  part(new THREE.SphereGeometry(0.08, 5, 4), bas(0xffe34a), -0.17, 1.55, 0.35, g); // ojos
+  part(new THREE.SphereGeometry(0.08, 5, 4), bas(0xffe34a), 0.17, 1.55, 0.35, g);
+  part(new THREE.SphereGeometry(0.03, 4, 3), bas(0x000000), -0.17, 1.55, 0.42, g);
+  part(new THREE.SphereGeometry(0.03, 4, 3), bas(0x000000), 0.17, 1.55, 0.42, g);
+  const nose = part(new THREE.ConeGeometry(0.07, 0.3, 4), green, 0, 1.42, 0.42, g);
+  nose.rotation.x = Math.PI / 2;
+  part(new THREE.BoxGeometry(0.22, 0.05, 0.05), bas(0x120503), 0, 1.3, 0.38, g);  // boca
+  const aL = part(new THREE.BoxGeometry(0.12, 0.7, 0.12), green, -0.42, 0.85, 0.05, g); // brazos
+  aL.rotation.z = -0.2;
+  const aR = part(new THREE.BoxGeometry(0.12, 0.7, 0.12), green, 0.42, 0.85, 0.1, g);
+  aR.rotation.z = 0.2;
+  part(new THREE.BoxGeometry(0.05, 0.45, 0.02), steelM, 0.52, 0.55, 0.25, g);     // daga
+  g.scale.setScalar(0.85);
+  return g;
+}
+
+// Diálogos de cada NPC (cambian según el estado de la misión)
+function villagerDialogue() {
+  if (quest === 0) return {
+    lines: [
+      'Chist... acércate, caballero. Pocos caminan por estas tierras, y menos aún sobreviven.',
+      'La Reliquia del Eclipse se hizo pedazos cuando el sol murió. Tres fragmentos aún laten bajo este cielo morado.',
+      'Tráemelos. Verás su luz celeste alzarse entre la niebla, como columnas. Y cuidado con lo que te mira desde arriba.'
+    ],
+    after: () => { quest = 1; fragments.forEach(f => f.g.visible = true); updateQuestUI(); }
+  };
+  if (quest === 1) return { lines: ['Aún faltan fragmentos... ¿Ves las columnas de luz celeste? Sigue su resplandor. Son ' + (3 - frags) + ' los que faltan.'] };
+  if (quest === 2) return {
+    lines: [
+      'Los tienes... los tres. Su luz casi quema.',
+      'Gracias, caballero sin nombre. Esto es solo el principio: la reliquia pide algo más que fragmentos. Pero esa es otra historia.'
+    ],
+    after: () => { quest = 3; updateQuestUI(); }
+  };
+  return { lines: ['La reliquia duerme por ahora. Pero la luna sigue mirando... y sigue sonriendo.'] };
+}
+function gnomeDialogue() {
+  if (quest === 0) return { lines: ['¡Hi, hi! Un caballero de lata. Habla con el aldeano de la capucha, al norte: tiene un encargo para ti.', 'Yo solo cuido mi gorro. Me lo robaron una vez. Una vez fue suficiente.'] };
+  if (quest === 1) return { lines: ['¿Buscas fragmentos? Brillan casi tanto como mi gorro. Casi.', 'Busca columnas de luz celeste. Una entre las tumbas, otra en el templo roto y otra junto a los monolitos retorcidos.'] };
+  return { lines: ['¡Los has encontrado todos! Yo sabía que lo lograrías. Bueno... en realidad apostaba a que no.'] };
+}
+function goblinDialogue() {
+  if (quest === 0) return { lines: ['¡Shhh! ¡Tú! Sí, tú, lata andante. ¿Tienes monedas? ¿No? Qué lástima.', 'Hay un aldeano al norte que busca héroes. Yo busco cosas brillantes. Quizá podamos... no.'] };
+  if (quest === 1) return { lines: ['¿Fragmentos? Yo toqué uno una vez. Me quemó los dedos. ¡Nunca más!', 'Consejo gratis: no los dejes para la noche. Aquí siempre es de noche. ¡Ja, ja!'] };
+  return { lines: ['Tienes los tres... ¿seguro que no sobra uno para el pobre duende? ¿No? Vale, vale.'] };
+}
+
+function addNPC(mesh, x, z, name, dialogueFn) {
+  const gy = heightAt(x, z);
+  mesh.position.set(x, gy, z);
+  scene.add(mesh);
+  addObs(x, z, 0.8, 99);
+  npcs.push({ mesh, x, z, gy, name, dialogue: dialogueFn, ph: Math.random() * 6.28 });
+}
+
+function buildNPCs() {
+  addNPC(makeVillager(), 6, -15, 'Aldeano encapuchado', villagerDialogue);
+  addNPC(makeGnome(), -16, 13, 'Gnomo del gorro rojo', gnomeDialogue);
+  addNPC(makeGoblin(), 19, 15, 'Duende', goblinDialogue);
+
+  // 3 fragmentos de reliquia (columna de luz + cristal flotante). Ocultos hasta aceptar la misión
+  const spots = [[28, -30], [-36, 32], [-58, 2]];
+  const crystalGeo = new THREE.OctahedronGeometry(0.7, 0);
+  const beamGeo = new THREE.CylinderGeometry(0.12, 0.45, 18, 8, 1, true);
+  for (const [x, z] of spots) {
+    const g = new THREE.Group();
+    const gy = heightAt(x, z);
+    g.position.set(x, gy, z);
+    const crystal = new THREE.Mesh(crystalGeo, bas(0xbff8ff));
+    crystal.scale.set(0.8, 1.4, 0.8);
+    crystal.position.y = 1.5;
+    g.add(crystal);
+    const beam = new THREE.Mesh(beamGeo, new THREE.MeshBasicMaterial({
+      color: 0x66e6ff, transparent: true, opacity: 0.22, blending: THREE.AdditiveBlending,
+      depthWrite: false, side: THREE.DoubleSide, fog: false
+    }));
+    beam.position.y = 9;
+    g.add(beam);
+    g.visible = false;
+    scene.add(g);
+    fragments.push({ g, crystal, x, z, y: gy + 1.5, ph: Math.random() * 6.28 });
+  }
+}
+
+// ---------- MISIÓN / DIÁLOGO ----------
+function updateQuestUI() {
+  const q = $('quest');
+  if (quest === 0) { q.classList.add('hidden'); return; }
+  if (playing || quest === 1) q.classList.remove('hidden');
+  if (quest === 1) q.innerHTML = 'Misión: Fragmentos de reliquia<br><b>' + frags + ' / 3</b>';
+  else if (quest === 2) q.innerHTML = 'Misión: Fragmentos de reliquia<br><b>3 / 3</b> · Vuelve con el aldeano';
+  else q.innerHTML = 'Misión completada ✔';
+}
+
+function closeDialogue(runAfter) {
+  if (!dlg) return;
+  const a = dlg.after;
+  dlg = null;
+  clearTimeout(fadeTimer);
+  fadeTimer = setTimeout(() => $('story').classList.add('faded'), 6000);
+  if (runAfter && a) a();
+}
+
+function interact() {
+  if (!playing) return;
+  if (dlg) {
+    if (typing) { finishTyping(); return; }
+    dlg.i++;
+    if (dlg.i >= dlg.lines.length) closeDialogue(true);
+    else say(dlg.lines[dlg.i], dlg.npc.name, true);
+    return;
+  }
+  if (nearNpc) {
+    const d = nearNpc.dialogue();
+    dlg = { npc: nearNpc, lines: d.lines, after: d.after, i: 0 };
+    $('prompt').classList.add('hidden');
+    say(d.lines[0], nearNpc.name, true);
+  }
+}
+
+function updateNPCs(dt) {
+  nearNpc = null;
+  let best = 4.2;
+  for (const n of npcs) {
+    const dx = pos.x - n.x, dz = pos.z - n.z, d = Math.hypot(dx, dz);
+    if (d < best) { best = d; nearNpc = n; }
+    // Mirar al jugador cuando está cerca, balancearse cuando no
+    n.mesh.position.y = n.gy + Math.sin(time * 1.5 + n.ph) * 0.03;
+    if (d < 11) {
+      let a = Math.atan2(dx, dz) - n.mesh.rotation.y;
+      a = Math.atan2(Math.sin(a), Math.cos(a));
+      n.mesh.rotation.y += a * Math.min(1, dt * 4);
+    } else {
+      n.mesh.rotation.y += Math.sin(time * 0.5 + n.ph) * 0.003;
+    }
+  }
+  if (dlg && Math.hypot(pos.x - dlg.npc.x, pos.z - dlg.npc.z) > 8) closeDialogue(false);
+  $('prompt').classList.toggle('hidden', !(nearNpc && !dlg));
+}
+
+function updateFragments() {
+  for (const f of fragments) {
+    if (!f.g.visible) continue;
+    f.crystal.rotation.y = time * 1.6 + f.ph;
+    f.crystal.position.y = 1.5 + Math.sin(time * 2 + f.ph) * 0.25;
+    if (Math.hypot(pos.x - f.x, pos.z - f.z) < 3 && Math.abs(pos.y - f.y) < 4) {
+      f.g.visible = false;
+      frags++;
+      if (frags >= 3) {
+        quest = 2;
+        say('Los tres fragmentos vibran juntos en tu mano. Vuelve con el aldeano encapuchado, al norte del inicio.', 'Reliquia');
+      } else {
+        say('Fragmento de reliquia recogido (' + frags + '/3). Su luz late como un corazón herido.', 'Reliquia');
+      }
+      updateQuestUI();
+    }
+  }
+}
+
 function initGame() {
   renderer = new THREE.WebGLRenderer({ canvas: $('game'), antialias: false, powerPreference: 'low-power' });
   renderer.setSize(window.innerWidth, window.innerHeight);
@@ -618,6 +1009,7 @@ function initGame() {
   scene.add(torch);
 
   buildWorld();
+  buildNPCs();
   knight = makeKnight();
   scene.add(knight);
 
@@ -655,8 +1047,8 @@ function updateArches() {
 
 // ---------- ACTUALIZAR CADA FRAME ----------
 function update(dt) {
-  // Girar cámara con teclado (Q/E o flechas)
-  yaw += (((keys['arrowleft'] || keys['q']) ? 1 : 0) - ((keys['arrowright'] || keys['e']) ? 1 : 0)) * 2 * dt;
+  // Girar cámara con el teclado (flechas)
+  yaw += ((keys['arrowleft'] ? 1 : 0) - (keys['arrowright'] ? 1 : 0)) * 2 * dt;
   pitch += ((keys['arrowdown'] ? 1 : 0) - (keys['arrowup'] ? 1 : 0)) * 1.2 * dt;
   pitch = Math.max(0.05, Math.min(1.3, pitch));
 
@@ -693,7 +1085,7 @@ function update(dt) {
   const ground = heightAt(pos.x, pos.z);
   if (keys[' '] && onGround) {
     vy = 10.5; onGround = false;
-    if (!jumpSaid) { jumpSaid = true; say('El suelo te suelta un instante. Allá arriba, la luna te mira... y no parece sorprendida.'); }
+    if (!jumpSaid && !dlg) { jumpSaid = true; say('El suelo te suelta un instante. Allá arriba, la luna te mira... y no parece sorprendida.'); }
   }
   if (!onGround) {
     vy -= 26 * dt;
@@ -732,15 +1124,19 @@ function update(dt) {
   moonLight.position.set(pos.x - 30, pos.y + 50, pos.z - 20);
   moonLight.target.position.copy(pos);
 
+  // NPCs y fragmentos
+  updateNPCs(dt);
+  updateFragments();
+
   // Zonas: mostrar descripción al entrar por primera vez
   for (const z of zones) {
-    if (!z.seen && Math.hypot(pos.x - z.x, pos.z - z.z) < z.r) {
+    if (!z.seen && !dlg && Math.hypot(pos.x - z.x, pos.z - z.z) < z.r) {
       z.seen = true;
       say(z.text);
     }
   }
 
-  if (!moonSaid && time > 40) {
+  if (!moonSaid && !dlg && time > 40) {
     moonSaid = true;
     say('Alzas la vista hacia el norte. Una luna rota te sonríe con dientes de plata. Juraría que acaba de parpadear.');
   }
