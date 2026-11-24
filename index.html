@@ -4,26 +4,40 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Eclipse de Cenizas</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=4">
 </head>
 <body>
 
   <canvas id="game"></canvas>
 
-  <div id="intro" class="screen">
-    <p class="line l1">El sol se apagó para siempre...</p>
-    <p class="line l2">Los reinos cayeron. La oscuridad despertó.</p>
-    <h1 class="line l3">ECLIPSE DE CENIZAS</h1>
-    <p class="skip">Pulsa para saltar</p>
+  <!-- 1) CARTEL: lo único visible al abrir la página -->
+  <div id="splash" class="screen">
+    <div class="splash-glow"></div>
+    <div class="swing">
+      <div class="chain chain-l"></div>
+      <div class="chain chain-r"></div>
+      <div class="sign">
+        <span class="nail n1"></span>
+        <span class="nail n2"></span>
+        <span class="nail n3"></span>
+        <span class="nail n4"></span>
+        <span class="knot k1"></span>
+        <span class="knot k2"></span>
+        <h1 class="carved">AyuCreations</h1>
+        <div class="sheen"></div>
+      </div>
+    </div>
+    <p class="skip">Pulsa para continuar</p>
   </div>
 
-  <div id="menu" class="screen hidden">
+  <!-- 2) MENÚ y OPCIONES: ocultos al inicio -->
+  <div id="menu" class="screen hidden" style="display:none">
     <h1 class="title">ECLIPSE DE CENIZAS</h1>
     <button id="btnPlay">Jugar</button>
     <button id="btnOptions">Opciones</button>
   </div>
 
-  <div id="options" class="screen hidden">
+  <div id="options" class="screen hidden" style="display:none">
     <h2 class="title2">Opciones</h2>
     <p>Calidad gráfica (baja = menos lag)</p>
     <div class="row">
@@ -33,18 +47,23 @@
     <button id="btnBack">Volver</button>
   </div>
 
+  <button id="btnMusic" class="hidden">🎵 Música: OFF</button>
+
   <div id="hud" class="hidden">
-    WASD: moverse (hacia donde mira la cámara) · Shift: correr · Espacio: saltar<br>
+    WASD: moverse (hacia donde mira la cámara) · Shift: correr · Espacio: saltar · E: hablar<br>
     Ratón: clic para capturarlo y girar la cámara (o mantén pulsado y arrastra)<br>
-    Q/E o flechas: girar cámara · P: pausa
+    Flechas ← →: girar cámara · P: pausa
   </div>
 
+  <div id="quest" class="hidden"></div>
+  <div id="prompt" class="hidden">Pulsa E para hablar</div>
+
   <div id="story" class="hidden">
-    <div class="who">Narrador</div>
+    <div class="who" id="storyWho">Narrador</div>
     <p id="storyText"></p>
   </div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-  <script src="script.js"></script>
+  <script src="script.js?v=4"></script>
 </body>
 </html>
