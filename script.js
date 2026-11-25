@@ -69,7 +69,7 @@ function applyQuality() {
   if (!renderer) return;
   renderer.setPixelRatio(settings.quality === 'low' ? 0.6 : 1);
   renderer.setSize(window.innerWidth, window.innerHeight);
-  if (grass) grass.count = settings.quality === 'low' ? 1000 : 2400;
+  if (grass) grass.count = settings.quality === 'low' ? Math.floor(grassTotal * 0.45) : grassTotal;
 }
 
 // Instrucciones (arriba izquierda): visibles unos segundos
@@ -109,7 +109,7 @@ function startPlaying() {
   if (!started) {
     initGame();
     started = true;
-    say('Despiertas entre cenizas frías, ' + playerName + '. El aire huele a hierro y a tumba. Al norte, un farol naranja arde junto a una figura encapuchada. Camina.');
+    say('Despiertas entre cenizas frías, ' + playerName + '. Estás en la aldea y las fogatas son lo único que aún late. Cuatro caminos de piedra salen de aquí. Al norte, un farol naranja arde junto a una figura encapuchada.');
   }
   applyQuality();
   playing = true;
@@ -242,6 +242,25 @@ function boom(t) {
   o.start(t); o.stop(t + 3.2);
 }
 
+// Graznido de cuervo (solo suena si la música está activada; el volumen baja con la distancia)
+function caw(vol) {
+  if (!actx || !musicOn || vol < 0.03) return;
+  const t = actx.currentTime;
+  for (let k = 0; k < 2; k++) {
+    const t0 = t + k * 0.32;
+    const o = actx.createOscillator(); o.type = 'sawtooth';
+    o.frequency.setValueAtTime(520, t0);
+    o.frequency.exponentialRampToValueAtTime(250, t0 + 0.2);
+    const f = actx.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 950; f.Q.value = 2.5;
+    const g = actx.createGain();
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.linearRampToValueAtTime(0.14 * vol, t0 + 0.03);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.24);
+    o.connect(f); f.connect(g); g.connect(bus);
+    o.start(t0); o.stop(t0 + 0.28);
+  }
+}
+
 function scheduleMusic() {
   if (!actx || !musicOn) return;
   const now = actx.currentTime;
@@ -363,16 +382,23 @@ $('game').addEventListener('click', () => {
 
 // ---------- VARIABLES DEL MUNDO ----------
 let renderer, scene, camera, clock, knight, legL, legR, armL, armR;
-let hemi, moonLight, torch, grass;
-let moonSprite, stars, moonTex;
+let hemi, moonLight, torch, fireLight, grass, grassTotal = 0;
+let moonSprite, stars, moonTex, starPh, starSp;
+let sunSprite, sunGlow, fireflies, ffBase, ffPh, glowTexCache = null;
 let time = 0, walkT = 0, walkAmp = 0, air = 0, knightYaw = Math.PI;
-let vy = 0, onGround = true, jumpSaid = false, moonSaid = false;
+let vy = 0, onGround = true, jumpSaid = false, moonSaid = false, sunSaid = false;
 const pos = new THREE.Vector3(0, 0, 0);
 const focus = new THREE.Vector3();
 let focusReady = false;
 const obstacles = [];
 const arches = [];
+const fires = [];
+const crows = [];
+const perches = [];
+const pathSegs = [];
+let boat = null;
 const dummy = new THREE.Object3D();
+const tmpC = new THREE.Color();
 
 // Misión y NPCs
 let quest = 0;        // 0 = sin aceptar, 1 = en curso, 2 = fragmentos listos, 3 = completada
@@ -393,52 +419,143 @@ function rnd() {
 const palette = [0x1b0a2e, 0x2d1248, 0x3b1a5c, 0x120824, 0x4a1d6e, 0x240f3a, 0x5a2a5a].map(c => new THREE.Color(c));
 const skyColor = new THREE.Color();
 
-const MAP = 90; // el mapa va de -90 a 90
+// =====================================================
+//  TERRENO, BIOMAS Y CAMINOS
+// =====================================================
+const MAP = 120;                 // el mapa va de -120 a 120
+const WATER_Y = -0.6;
+const LAKE = { x: -50, z: 62, r: 14 };
+const BZ = 58;                   // z del puente (x = 0)
+const riverZ = x => 58 + 4 * Math.sin(x * 0.05);
+function sm(a, b, x) {           // suavizado (a -> 0, b -> 1)
+  const t = Math.max(0, Math.min(1, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+}
+// Montañas escalables (x, z, altura, anchura): pendiente suave de unos 30 grados como máximo
+const PEAKS = [[-62, 108, 17, 26], [8, 114, 24, 26], [66, 104, 18, 24], [-24, 100, 9, 16], [38, 112, 12, 16]];
 
+function terrain(x, z) {
+  const f = sm(14, 38, Math.hypot(x, z)); // la aldea es llana
+  let h = (2.3 + Math.sin(x * 0.06) * Math.cos(z * 0.07) * 1.8 + Math.sin(x * 0.15 + z * 0.11) * 0.5) * f;
+  for (const p of PEAKS) {
+    const dx = x - p[0], dz = z - p[1], q = (dx * dx + dz * dz) / (2 * p[3] * p[3]);
+    if (q < 9) h += p[2] * Math.exp(-q);
+  }
+  const wl = sm(LAKE.r, LAKE.r * 0.55, Math.hypot(x - LAKE.x, z - LAKE.z)); // lago
+  h += (-2.8 - h) * wl;
+  const wr = sm(7, 3.2, Math.abs(z - riverZ(x))) * sm(-62, -44, x) * sm(78, 66, x); // río
+  h += (-2.5 - h) * wr;
+  return h;
+}
+// Suelo real: terreno + cubierta del puente
 function heightAt(x, z) {
-  const d = Math.sqrt(x * x + z * z);
-  const f = Math.min(1, Math.max(0, (d - 10) / 25));
-  return (Math.sin(x * 0.06) * Math.cos(z * 0.07) * 3 + Math.sin(x * 0.15 + z * 0.11) * 0.7) * f;
+  const h = terrain(x, z);
+  if (Math.abs(x) < 2.6) {
+    const dz = z - BZ;
+    if (Math.abs(dz) < 9.5) return Math.max(h, 2.35 + 0.9 * (1 - (dz / 9.5) * (dz / 9.5)));
+  }
+  return h;
+}
+
+// Biomas (peso 0..1)
+const BIO = { forest: { x: -80, z: -4, r: 48 }, autumn: { x: 80, z: -4, r: 48 }, snow: { x: 0, z: 92, r: 66 } };
+const bw = (b, x, z) => sm(b.r, b.r * 0.55, Math.hypot(x - b.x, z - b.z));
+
+const colBase = new THREE.Color(0x1c1a24), colVill = new THREE.Color(0x2c2520), colFor = new THREE.Color(0x14281f);
+const colAut = new THREE.Color(0x3d2c15), colSnow = new THREE.Color(0xd2dcf2), colBed = new THREE.Color(0x0d1a26);
+function groundColor(x, z, h, out) {
+  out.copy(colBase).lerp(colFor, bw(BIO.forest, x, z)).lerp(colAut, bw(BIO.autumn, x, z))
+    .lerp(colSnow, bw(BIO.snow, x, z)).lerp(colVill, sm(28, 14, Math.hypot(x, z)));
+  if (h < 0.6) out.lerp(colBed, Math.min(1, (0.6 - h) / 1.5));
+  return out;
+}
+
+// Caminos de losas que conectan la aldea con todas las zonas
+const PATHS = [
+  [[-12, 1], [-30, -2], [-50, -6], [-66, -4], [-80, -4]],   // oeste: bosque encantado
+  [[12, 1], [30, -2], [50, -6], [66, -4], [80, -4]],        // este: bosque dorado
+  [[0, 14], [0, 30], [2, 46], [0, 49]],                     // sur hasta el puente
+  [[0, 67], [0, 80], [2, 95], [8, 106]],                    // tras el puente: montañas
+  [[1, 72], [-20, 70], [-40, 68]],                          // hacia el lago
+  [[0, -10], [-1, -28], [3, -42], [14, -52], [24, -52]],    // norte: cementerio
+  [[-1, -30], [-14, -44], [-28, -50]]                       // norte: templo en ruinas
+];
+PATHS.forEach(p => { for (let i = 0; i < p.length - 1; i++) pathSegs.push([p[i][0], p[i][1], p[i + 1][0], p[i + 1][1]]); });
+function distPath(x, z) {
+  let best = 1e9;
+  for (const s of pathSegs) {
+    const dx = s[2] - s[0], dz = s[3] - s[1];
+    const t = Math.max(0, Math.min(1, ((x - s[0]) * dx + (z - s[1]) * dz) / (dx * dx + dz * dz)));
+    const d = Math.hypot(x - (s[0] + dx * t), z - (s[1] + dz * t));
+    if (d < best) best = d;
+  }
+  return best;
 }
 
 // Zonas con descripción: al entrar se muestra el texto una vez
 const zones = [
-  { x: 32, z: -28, r: 17, seen: false, text: 'Lápidas torcidas se alzan del barro. Algunas llevan nombres que el tiempo borró. Algo susurra bajo la tierra.' },
-  { x: -38, z: -32, r: 20, seen: false, text: 'Un bosque de árboles muertos te rodea. Sus ramas parecen manos que intentan aferrar un cielo que ya no les pertenece.' },
-  { x: -32, z: 38, r: 15, seen: false, text: 'Columnas rotas de un templo olvidado. Aquí alguien rezó una última vez... y nadie respondió.' },
-  { x: 40, z: 40, r: 15, seen: false, text: 'Cristales violetas palpitan en la oscuridad como corazones helados. El aire vibra con una magia antigua y hambrienta.' },
-  { x: -62, z: 5, r: 16, seen: false, text: 'Monolitos retorcidos se inclinan hacia ti, como si la piedra se hubiera cansado de estar quieta. Cuanto más los miras, más parecen girar.' },
-  { x: 0, z: 62, r: 24, seen: false, text: 'Arcos de piedra flotan sobre tu cabeza, sin pilares, sin motivo. Ninguno lleva a ningún sitio... o quizá a todos.' },
-  { x: 62, z: 8, r: 16, seen: false, text: 'Una escalera asciende en espiral hacia la nada. El primer peldaño está demasiado alto. Nadie ha subido en siglos. O eso quieres creer.' }
+  { x: -80, z: -4, r: 26, seen: false, text: 'El bosque encantado respira a tu alrededor. Setas de luz fría brotan entre las raíces y miles de luciérnagas parecen susurrar tu nombre.' },
+  { x: 80, z: -4, r: 26, seen: false, text: 'Hojas doradas y anaranjadas cubren el suelo. Es un otoño eterno... y los cuervos observan desde las ramas.' },
+  { x: 0, z: 92, r: 18, seen: false, text: 'Aquí la nieve no se derrite ni cae. Las montañas se alzan como murallas. Con paciencia, se pueden subir.' },
+  { x: 8, z: 108, r: 12, seen: false, text: 'Desde lo alto, el mundo entero parece un tablero apagado. La luna te sonríe desde el norte.' },
+  { x: -50, z: 62, r: 22, seen: false, text: 'Un lago negro como un espejo roto. Un barquito vacío flota a la deriva, con un farol aún encendido.' },
+  { x: 0, z: 58, r: 9, seen: false, text: 'El puente de piedra cruza el río. Bajo tus pies, el agua susurra historias de quienes no llegaron al otro lado.' },
+  { x: 25, z: -52, r: 18, seen: false, text: 'Lápidas torcidas se alzan del barro. Algunas llevan nombres que el tiempo borró. Algo susurra bajo la tierra.' },
+  { x: -32, z: -52, r: 16, seen: false, text: 'Columnas rotas de un templo olvidado. Aquí alguien rezó una última vez... y nadie respondió.' },
+  { x: 48, z: 40, r: 15, seen: false, text: 'Cristales violetas palpitan en la oscuridad como corazones helados. El aire vibra con una magia antigua y hambrienta.' },
+  { x: -40, z: 30, r: 15, seen: false, text: 'Monolitos retorcidos se inclinan hacia ti, como si la piedra se hubiera cansado de estar quieta.' },
+  { x: 62, z: 60, r: 24, seen: false, text: 'Arcos de piedra flotan sobre tu cabeza, sin pilares, sin motivo. Ninguno lleva a ningún sitio... o quizá a todos.' },
+  { x: 88, z: 40, r: 14, seen: false, text: 'Una escalera asciende en espiral hacia la nada. El primer peldaño está demasiado alto. Nadie ha subido en siglos.' }
 ];
 
 function scatter(cx, cz, radius) {
   const a = rnd() * 6.283, d = Math.sqrt(rnd()) * radius;
   return [cx + Math.cos(a) * d, cz + Math.sin(a) * d];
 }
-// Igual que scatter, pero solo devuelve puntos con z >= minZ (zona sur, lejos de la luna)
-function scatterIn(cx, cz, radius, minZ) {
-  let p;
-  do { p = scatter(cx, cz, radius); } while (p[1] < minZ);
-  return p;
+// Punto válido para colocar objetos: fuera de la aldea, del agua y de los caminos
+function pick(cx, cz, r, pathM) {
+  for (let i = 0; i < 12; i++) {
+    const [x, z] = scatter(cx, cz, r);
+    if (Math.abs(x) > MAP - 3 || Math.abs(z) > MAP - 3) continue;
+    if (terrain(x, z) < 0.35) continue;
+    if (Math.hypot(x, z) < 22) continue;
+    if (distPath(x, z) < pathM) continue;
+    return [x, z];
+  }
+  return null;
 }
 
 function addObs(x, z, r, h) {
   obstacles.push({ x, z, r, h, gy: heightAt(x, z) });
 }
 
-function addInstanced(geo, mat, n, fn) {
-  const m = new THREE.InstancedMesh(geo, mat, n);
+// Malla instanciada. fn(i) coloca la instancia (con dummy); cf(i) devuelve su color (opcional)
+function addInstanced(geo, mat, n, fn, cf) {
+  const m = new THREE.InstancedMesh(geo, mat, Math.max(1, n));
   for (let i = 0; i < n; i++) {
     dummy.position.set(0, 0, 0); dummy.rotation.set(0, 0, 0); dummy.scale.set(1, 1, 1);
     fn(i);
     dummy.updateMatrix();
     m.setMatrixAt(i, dummy.matrix);
+    if (cf) m.setColorAt(i, tmpC.set(cf(i)));
   }
+  m.count = n;
   m.instanceMatrix.needsUpdate = true;
+  if (m.instanceColor) m.instanceColor.needsUpdate = true;
   m.frustumCulled = false; // necesario para que las instancias lejanas no desaparezcan
   scene.add(m);
   return m;
+}
+
+function glowTex() {
+  if (glowTexCache) return glowTexCache;
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const g = c.getContext('2d');
+  const gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.35, 'rgba(255,255,255,0.45)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
+  glowTexCache = new THREE.CanvasTexture(c);
+  return glowTexCache;
 }
 
 // Mechón de hierba: 5 hojitas triangulares (15 vértices)
@@ -464,117 +581,387 @@ function makeGrassGeo() {
   return g;
 }
 
-function buildWorld() {
-  // Suelo (pocos polígonos)
-  const gg = new THREE.PlaneGeometry(MAP * 2 + 160, MAP * 2 + 160, 70, 70);
+function lam(c) { return new THREE.MeshLambertMaterial({ color: c, flatShading: true }); }
+function bas(c) { return new THREE.MeshBasicMaterial({ color: c }); }
+function part(geo, mat, x, y, z, parent) {
+  const m = new THREE.Mesh(geo, mat);
+  m.position.set(x, y, z);
+  parent.add(m);
+  return m;
+}
+
+// ---------- SUELO, AGUA, HIERBA Y CAMINOS ----------
+function buildGround() {
+  const gg = new THREE.PlaneGeometry(400, 400, 140, 140);
   gg.rotateX(-Math.PI / 2);
   const p = gg.attributes.position;
-  for (let i = 0; i < p.count; i++) p.setY(i, heightAt(p.getX(i), p.getZ(i)));
+  const cols = new Float32Array(p.count * 3);
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), z = p.getZ(i), h = terrain(x, z);
+    p.setY(i, h);
+    groundColor(x, z, h, tmpC);
+    cols[i * 3] = tmpC.r; cols[i * 3 + 1] = tmpC.g; cols[i * 3 + 2] = tmpC.b;
+  }
+  gg.setAttribute('color', new THREE.BufferAttribute(cols, 3));
   gg.computeVertexNormals();
-  scene.add(new THREE.Mesh(gg, new THREE.MeshLambertMaterial({ color: 0x1c1a24, flatShading: true })));
+  scene.add(new THREE.Mesh(gg, new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true })));
 
-  // Hierba oscura (un solo dibujo para todos los mechones)
-  grass = addInstanced(makeGrassGeo(), new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }), 2400, () => {
-    const x = (rnd() - 0.5) * MAP * 2, z = (rnd() - 0.5) * MAP * 2;
-    dummy.position.set(x, heightAt(x, z), z);
+  // Agua del lago y del río
+  const wg = new THREE.PlaneGeometry(300, 300);
+  wg.rotateX(-Math.PI / 2);
+  const water = new THREE.Mesh(wg, new THREE.MeshLambertMaterial({ color: 0x1d3a63, emissive: 0x0a1430, transparent: true, opacity: 0.82 }));
+  water.position.y = WATER_Y;
+  scene.add(water);
+
+  // Hierba: un solo dibujo para todos los mechones, con color según el bioma
+  grassTotal = 4200;
+  const gx = [], gz = [], tint = new THREE.Color();
+  grass = addInstanced(makeGrassGeo(), new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }), grassTotal, i => {
+    let x = 0, z = 0, ok = false;
+    for (let t = 0; t < 8 && !ok; t++) {
+      x = (rnd() - 0.5) * MAP * 2; z = (rnd() - 0.5) * MAP * 2;
+      if (terrain(x, z) < 0.3) continue;
+      if (distPath(x, z) < 1.6) continue;
+      if (Math.hypot(x, z) < 24 && rnd() < 0.8) continue;
+      if (bw(BIO.snow, x, z) > 0.5 && rnd() < 0.8) continue;
+      ok = true;
+    }
+    gx[i] = x; gz[i] = z;
+    dummy.position.set(x, ok ? heightAt(x, z) : -60, z);
     dummy.rotation.y = rnd() * 6.28;
     const s = 0.8 + rnd() * 0.8;
     dummy.scale.set(s, 0.7 + rnd() * 0.9, s);
+  }, i => {
+    const wf = bw(BIO.forest, gx[i], gz[i]), wa = bw(BIO.autumn, gx[i], gz[i]), ws = bw(BIO.snow, gx[i], gz[i]);
+    const k = 0.8 + rnd() * 0.6;
+    return tint.setRGB((1 + 2 * wa + 2.5 * ws) * k, (1 + 0.6 * wf + 0.5 * wa + 2.8 * ws) * k, Math.max(0.2, 1 + 0.5 * wf - 0.6 * wa + 3.8 * ws) * k);
   });
 
-  // Árboles muertos
-  const trees = [];
-  for (let i = 0; i < 70; i++) {
-    let x, z;
-    if (i < 35) [x, z] = scatter(-38, -32, 22);
-    else { x = (rnd() - 0.5) * MAP * 2; z = (rnd() - 0.5) * MAP * 2; }
-    if (Math.hypot(x, z) < 9) { x += 14; }
-    trees.push({ x, z, h: 4 + rnd() * 4 });
-    addObs(x, z, 0.7, 99);
+  // Losas de piedra con musgo
+  const slabs = [], moss = [];
+  for (const s of pathSegs) {
+    const len = Math.hypot(s[2] - s[0], s[3] - s[1]);
+    const dx = (s[2] - s[0]) / len, dz = (s[3] - s[1]) / len, nx = -dz, nz = dx;
+    for (let d = 0; d < len; d += 1.7) {
+      for (const lane of [-0.95, 0.95]) {
+        const x = s[0] + dx * d + nx * lane + (rnd() - 0.5) * 0.4, z = s[1] + dz * d + nz * lane + (rnd() - 0.5) * 0.4;
+        if (terrain(x, z) < 0.3) continue;
+        if (Math.abs(x) < 4.2 && Math.abs(z - BZ) < 10.5) continue; // el puente tiene su propia cubierta
+        slabs.push([x, z, Math.atan2(dx, dz) + (rnd() - 0.5) * 0.5, 1.1 + rnd() * 0.6, 0.9 + rnd() * 0.5]);
+        if (rnd() < 0.45) moss.push([x + (rnd() - 0.5) * 0.8, z + (rnd() - 0.5) * 0.8, 0.35 + rnd() * 0.4]);
+      }
+    }
   }
-  const trunkGeo = new THREE.CylinderGeometry(0.12, 0.35, 1, 5); trunkGeo.translate(0, 0.5, 0);
-  const treeMat = new THREE.MeshLambertMaterial({ color: 0x0f0b12 });
-  addInstanced(trunkGeo, treeMat, trees.length, i => {
-    const t = trees[i];
-    dummy.position.set(t.x, heightAt(t.x, t.z), t.z);
+  const stoneCols = [0x5a5866, 0x4c4a58, 0x676370, 0x585e5a, 0x4a5846];
+  addInstanced(new THREE.BoxGeometry(1, 0.18, 1), new THREE.MeshLambertMaterial({ flatShading: true }), slabs.length, i => {
+    const [x, z, r, w, h] = slabs[i];
+    dummy.position.set(x, heightAt(x, z) + 0.08, z);
+    dummy.rotation.y = r;
+    dummy.scale.set(w, 1, h);
+  }, () => stoneCols[(rnd() * stoneCols.length) | 0]);
+  const mossCols = [0x2f5a2c, 0x3b6b34, 0x26492a];
+  addInstanced(new THREE.SphereGeometry(1, 5, 3), new THREE.MeshLambertMaterial({ flatShading: true }), moss.length, i => {
+    const [x, z, s] = moss[i];
+    dummy.position.set(x, heightAt(x, z) + 0.14, z);
+    dummy.rotation.y = rnd() * 6;
+    dummy.scale.set(s, 0.1, s * 0.8);
+  }, () => mossCols[(rnd() * mossCols.length) | 0]);
+}
+
+// ---------- CARTELES DE MADERA ----------
+function makeSign(x, z, text) {
+  const c = document.createElement('canvas'); c.width = 512; c.height = 128;
+  const g = c.getContext('2d');
+  const gr = g.createLinearGradient(0, 0, 0, 128);
+  gr.addColorStop(0, '#7a4f2c'); gr.addColorStop(1, '#5a3820');
+  g.fillStyle = gr; g.fillRect(0, 0, 512, 128);
+  g.strokeStyle = 'rgba(0,0,0,.25)'; g.lineWidth = 2;
+  for (let i = 10; i < 128; i += 14) { g.beginPath(); g.moveTo(0, i); g.lineTo(512, i + (i % 3)); g.stroke(); }
+  g.strokeStyle = '#2a170a'; g.lineWidth = 8; g.strokeRect(4, 4, 504, 120);
+  g.font = '700 32px Cinzel, Georgia, serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillStyle = 'rgba(255,214,160,.55)'; g.fillText(text, 257, 66);
+  g.fillStyle = '#140803'; g.fillText(text, 256, 64);
+  const wood = lam(0x5a3a22);
+  const grp = new THREE.Group();
+  part(new THREE.BoxGeometry(0.22, 2.8, 0.22), wood, 0, 1.4, 0, grp);
+  const board = new THREE.Mesh(new THREE.BoxGeometry(2.8, 0.9, 0.12), [wood, wood, wood, wood, new THREE.MeshLambertMaterial({ map: new THREE.CanvasTexture(c) }), wood]);
+  board.position.set(0, 2.35, 0.1);
+  grp.add(board);
+  grp.position.set(x, heightAt(x, z), z);
+  grp.rotation.y = Math.atan2(-x, -z); // mira hacia la aldea
+  scene.add(grp);
+  addObs(x, z, 0.4, 3);
+}
+function buildSigns() {
+  makeSign(-4, -4, 'ALDEA DE CENIZA');
+  makeSign(-22, 3, '◄ BOSQUE ENCANTADO');
+  makeSign(22, 3, 'BOSQUE DORADO ►');
+  makeSign(3, 26, '▼ TIERRAS NEVADAS');
+  makeSign(-4, -24, '▲ CEMENTERIO');
+  makeSign(-4, 46, 'PUENTE DE PIEDRA');
+  makeSign(5, 90, 'MONTAÑAS DEL SILENCIO');
+  makeSign(-30, 66, 'LAGO DE ESPEJOS');
+}
+
+// ---------- ÁRBOLES (instanciados) ----------
+const trunkGeo = new THREE.CylinderGeometry(0.12, 0.35, 1, 5); trunkGeo.translate(0, 0.5, 0);
+function mkTrees(n, cx, cz, rad, h0, h1, pathM) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const p = pick(cx, cz, rad, pathM);
+    if (p) out.push({ x: p[0], z: p[1], h: h0 + rnd() * (h1 - h0), r: rnd() * 6.28, c: (rnd() * 8) | 0 });
+  }
+  return out;
+}
+function addTrees(list, trunkCol, layers, cols, perch) {
+  if (!list.length) return;
+  addInstanced(trunkGeo, lam(trunkCol), list.length, i => {
+    const t = list[i];
+    dummy.position.set(t.x, terrain(t.x, t.z), t.z);
     dummy.scale.set(1, t.h, 1);
   });
+  for (const L of layers) {
+    addInstanced(L.geo, new THREE.MeshLambertMaterial({ flatShading: true, emissive: L.em || 0x000000 }), list.length, i => {
+      const t = list[i];
+      dummy.position.set(t.x, terrain(t.x, t.z) + t.h * L.y, t.z);
+      dummy.rotation.y = t.r;
+      dummy.scale.set(t.h * L.w, t.h * L.s, t.h * L.w);
+    }, i => cols[list[i].c % cols.length]);
+  }
+  for (const t of list) {
+    addObs(t.x, t.z, 0.7, 99);
+    if (perch) perches.push({ x: t.x, y: terrain(t.x, t.z) + t.h * 0.97, z: t.z });
+  }
+}
+const coneGeo = new THREE.ConeGeometry(1, 1, 6); coneGeo.translate(0, 0.5, 0);
+const blobGeo = new THREE.DodecahedronGeometry(1, 0);
+
+// ---------- ALDEA: casas abiertas y fogatas ----------
+function makeHouse(v) {
+  const g = new THREE.Group();
+  const wall = lam(v.wall), roof = lam(v.roof), wood = lam(0x3a2a1c), stone = lam(0x3b3944);
+  part(new THREE.BoxGeometry(6.6, 0.25, 5.6), stone, 0, 0.1, 0, g);          // suelo
+  part(new THREE.BoxGeometry(6, 3, 0.4), wall, 0, 1.6, -2.5, g);             // pared trasera
+  part(new THREE.BoxGeometry(0.4, 3, 5), wall, -3, 1.6, 0, g);               // pared izquierda
+  part(new THREE.BoxGeometry(0.4, 3, 5), wall, 3, 1.6, 0, g);                // pared derecha
+  part(new THREE.BoxGeometry(6.8, 0.35, 0.4), wood, 0, 3.2, 2.6, g);         // viga: el frente queda abierto
+  const r = part(new THREE.ConeGeometry(5, 2.6, 4), roof, 0, 4.5, 0, g);     // tejado
+  r.rotation.y = Math.PI / 4; r.scale.set(1.05, 1, 0.9);
+  part(new THREE.BoxGeometry(1.3, 0.7, 0.8), wood, -1.2, 0.55, -1.3, g);     // mesa
+  part(new THREE.SphereGeometry(0.18, 6, 5), bas(0xffb050), -1.2, 1.15, -1.3, g); // lámpara
+  part(new THREE.BoxGeometry(1.4, 0.4, 2.2), lam(v.bed), 1.8, 0.45, -0.9, g); // cama
+  return g;
+}
+function buildVillage() {
+  const variants = [
+    { wall: 0x5a4636, roof: 0x4a1d1d, bed: 0x6b2a2a }, { wall: 0x4a4a52, roof: 0x2f3a4a, bed: 0x2f4f6a },
+    { wall: 0x5a5040, roof: 0x3a2a14, bed: 0x4a5a2a }, { wall: 0x463a4a, roof: 0x3a1a4a, bed: 0x5a2a5a }
+  ];
+  [55, 125, 235, 305].forEach((deg, k) => {
+    const a = deg * Math.PI / 180, x = Math.cos(a) * 20, z = Math.sin(a) * 20;
+    const h = makeHouse(variants[k]);
+    h.position.set(x, heightAt(x, z), z);
+    const rot = Math.atan2(-x, -z);
+    h.rotation.y = rot;
+    scene.add(h);
+    // Colisiones de las paredes (la entrada queda libre)
+    const cs = Math.cos(rot), sn = Math.sin(rot);
+    const wallPts = [[-3, -2.5], [-1.5, -2.5], [0, -2.5], [1.5, -2.5], [3, -2.5], [-3, -1], [-3, 0.5], [-3, 2], [3, -1], [3, 0.5], [3, 2]];
+    for (const [lx, lz] of wallPts) addObs(x + lx * cs + lz * sn, z - lx * sn + lz * cs, 0.8, 3);
+  });
+
+  // Fogatas: piedras y troncos instanciados, llama animada
+  const spots = [[-9, -7], [7, 6], [-4, 22]], stones = [], logs = [];
+  const glowMat = () => new THREE.SpriteMaterial({ map: glowTex(), color: 0xff8a3a, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false });
+  for (const [x, z] of spots) {
+    const y = heightAt(x, z);
+    for (let k = 0; k < 8; k++) stones.push([x + Math.cos(k * 0.785) * 0.95, y + 0.12, z + Math.sin(k * 0.785) * 0.95]);
+    for (let k = 0; k < 3; k++) logs.push([x, y + 0.18, z, k * 1.05]);
+    const f1 = part(new THREE.ConeGeometry(0.45, 1.3, 6), bas(0xff7a1e), x, y + 0.8, z, scene);
+    const f2 = part(new THREE.ConeGeometry(0.26, 0.9, 5), bas(0xffd36a), x, y + 0.6, z, scene);
+    const glow = new THREE.Sprite(glowMat());
+    glow.scale.set(7, 7, 1); glow.position.set(x, y + 1.3, z);
+    scene.add(glow);
+    fires.push({ x, z, y, f1, f2, glow, ph: rnd() * 6 });
+    addObs(x, z, 1.0, 0.8);
+  }
+  addInstanced(new THREE.DodecahedronGeometry(0.28, 0), lam(0x4a4854), stones.length, i => {
+    dummy.position.set(stones[i][0], stones[i][1], stones[i][2]);
+    dummy.rotation.set(i, i * 2, i * 3);
+  });
+  const logGeo = new THREE.CylinderGeometry(0.12, 0.12, 1.4, 5); logGeo.rotateZ(Math.PI / 2);
+  addInstanced(logGeo, lam(0x3a2414), logs.length, i => {
+    dummy.position.set(logs[i][0], logs[i][1], logs[i][2]);
+    dummy.rotation.y = logs[i][3];
+  });
+}
+
+// ---------- BOSQUE ENCANTADO ----------
+function buildForest() {
+  const trees = mkTrees(60, -80, -4, 44, 6, 11, 3);
+  addTrees(trees, 0x1a1024, [
+    { geo: coneGeo, y: 0.35, w: 0.28, s: 0.55, em: 0x061a1a },
+    { geo: coneGeo, y: 0.62, w: 0.2, s: 0.45, em: 0x061a1a }
+  ], [0x1b4a45, 0x24605a, 0x2f4a6a, 0x3a2a6a], true);
+
+  // Setas brillantes
+  const sh = [];
+  for (let i = 0; i < 110; i++) { const p = pick(-80, -4, 44, 2.5); if (p) sh.push([p[0], p[1], 0.4 + rnd() * 1.0]); }
+  addInstanced(new THREE.CylinderGeometry(0.12, 0.16, 1, 5).translate(0, 0.5, 0), lam(0xd8d0c0), sh.length, i => {
+    const [x, z, s] = sh[i];
+    dummy.position.set(x, terrain(x, z), z);
+    dummy.scale.set(s * 0.5, s * 0.9, s * 0.5);
+  });
+  const mushCols = [0x39f5ff, 0xff4fd8, 0x9d6bff, 0x5cff9a];
+  addInstanced(new THREE.SphereGeometry(1, 7, 4, 0, Math.PI * 2, 0, Math.PI / 2), bas(0xffffff), sh.length, i => {
+    const [x, z, s] = sh[i];
+    dummy.position.set(x, terrain(x, z) + 0.9 * s, z);
+    dummy.scale.set(0.55 * s, 0.4 * s, 0.55 * s);
+  }, i => mushCols[i % mushCols.length]);
+
+  // Arbustos (en el bosque y repartidos por el mapa)
+  const bushes = [];
+  for (let i = 0; i < 90; i++) { const p = pick(-80, -4, 44, 2.2); if (p) bushes.push([p[0], p[1], 0.6 + rnd() * 0.9]); }
+  for (let i = 0; i < 30; i++) { const p = pick(0, 0, MAP, 2.2); if (p) bushes.push([p[0], p[1], 0.6 + rnd() * 0.8]); }
+  const bushCols = [0x173a2b, 0x1f4a33, 0x2a4a2a];
+  addInstanced(blobGeo, new THREE.MeshLambertMaterial({ flatShading: true }), bushes.length, i => {
+    const [x, z, s] = bushes[i];
+    dummy.position.set(x, terrain(x, z) + s * 0.25, z);
+    dummy.rotation.y = rnd() * 6;
+    dummy.scale.set(s, s * 0.7, s);
+  }, i => bushCols[i % bushCols.length]);
+
+  // Luciérnagas flotando
+  const n = 140, pp = new Float32Array(n * 3), cc = new Float32Array(n * 3);
+  ffBase = []; ffPh = [];
+  for (let i = 0; i < n; i++) {
+    const [x, z] = scatter(-80, -4, 42);
+    const y = Math.max(terrain(x, z), 0) + 0.8 + rnd() * 3.5;
+    ffBase.push([x, y, z]); ffPh.push(rnd() * 6.28);
+  }
+  const fg = new THREE.BufferGeometry();
+  fg.setAttribute('position', new THREE.BufferAttribute(pp, 3));
+  fg.setAttribute('color', new THREE.BufferAttribute(cc, 3));
+  fireflies = new THREE.Points(fg, new THREE.PointsMaterial({
+    map: glowTex(), size: 1.1, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, vertexColors: true
+  }));
+  fireflies.frustumCulled = false;
+  scene.add(fireflies);
+}
+
+// ---------- ZONA DE OTOÑO ----------
+function buildAutumn() {
+  const trees = mkTrees(50, 80, -4, 46, 6, 9.5, 3);
+  addTrees(trees, 0x3a2414, [
+    { geo: blobGeo, y: 0.72, w: 0.32, s: 0.28 },
+    { geo: blobGeo, y: 0.5, w: 0.25, s: 0.2 }
+  ], [0xd9822b, 0xe0a030, 0xb8541f, 0xc99a2e, 0x8a4a1c], true);
+}
+
+// ---------- ZONA NEVADA: pinos, puente, barquito ----------
+function buildSnow() {
+  const trees = mkTrees(42, 0, 92, 60, 6, 10, 3);
+  addTrees(trees, 0x2a1d16, [
+    { geo: coneGeo, y: 0.25, w: 0.26, s: 0.4 },
+    { geo: coneGeo, y: 0.5, w: 0.2, s: 0.35 },
+    { geo: coneGeo, y: 0.72, w: 0.13, s: 0.3 }
+  ], [0xdfe8ff, 0xc8d4ee, 0x9fb2d0], false);
+}
+
+function buildBridge() {
+  const stone = lam(0x5a5866), dark = lam(0x45434f);
+  const seg = [];
+  for (let i = 0; i < 10; i++) { const dz = -8.55 + i * 1.9; seg.push(dz); }
+  const deckY = dz => 2.35 + 0.9 * (1 - (dz / 9.5) * (dz / 9.5));
+  const rotX = dz => Math.atan(1.8 * dz / 90.25);
+  addInstanced(new THREE.BoxGeometry(5.2, 0.4, 2.2), stone, seg.length, i => {
+    dummy.position.set(0, deckY(seg[i]) - 0.2, BZ + seg[i]);
+    dummy.rotation.x = rotX(seg[i]);
+  });
+  addInstanced(new THREE.BoxGeometry(0.4, 0.9, 2.2), dark, seg.length * 2, i => {
+    const dz = seg[i >> 1];
+    dummy.position.set((i & 1 ? 2.4 : -2.4), deckY(dz) + 0.45, BZ + dz);
+    dummy.rotation.x = rotX(dz);
+  });
+  for (const dz of [-4.2, 4.2]) part(new THREE.BoxGeometry(5, 4.2, 1.1), dark, 0, 0.3, BZ + dz, scene); // pilares en el agua
+}
+
+function buildBoat() {
+  const g = new THREE.Group();
+  const wood = lam(0x4a3020), inner = lam(0x2a1a10);
+  part(new THREE.BoxGeometry(1.5, 0.45, 3.4), wood, 0, 0, 0, g);
+  part(new THREE.BoxGeometry(1.2, 0.3, 3.0), inner, 0, 0.14, 0, g);
+  const bow = part(new THREE.ConeGeometry(0.75, 1.3, 4), wood, 0, 0, 2.35, g);
+  bow.rotation.x = Math.PI / 2; bow.scale.set(1, 1, 0.55);
+  part(new THREE.BoxGeometry(1.3, 0.1, 0.4), wood, 0, 0.3, 0.2, g);        // asiento
+  const oar = part(new THREE.CylinderGeometry(0.04, 0.04, 2.4, 4), wood, 0.95, 0.55, 0.3, g);
+  oar.rotation.z = Math.PI / 2 * 0.9;
+  part(new THREE.CylinderGeometry(0.04, 0.04, 1.0, 4), wood, 0, 0.7, 1.3, g); // poste
+  part(new THREE.SphereGeometry(0.16, 6, 5), bas(0xffb050), 0, 1.3, 1.3, g);  // farol
+  g.position.set(-52, WATER_Y + 0.12, 61);
+  scene.add(g);
+  boat = g;
+  addObs(-52, 61, 1.5, 99);
+}
+
+// ---------- TIERRAS MUERTAS: cementerio, templo, cristales y rarezas ----------
+function buildOddities() {
+  // Árboles muertos (con ramas) en el norte
+  const dead = mkTrees(14, 25, -52, 20, 4, 8, 3).concat(mkTrees(12, -32, -52, 18, 4, 8, 3), mkTrees(8, 0, 0, 100, 4, 7, 3));
+  addTrees(dead, 0x0f0b12, [], [0], true);
   const branchGeo = new THREE.CylinderGeometry(0.03, 0.1, 1, 4); branchGeo.translate(0, 0.5, 0);
-  addInstanced(branchGeo, treeMat, trees.length * 2, i => {
-    const t = trees[i >> 1];
-    dummy.position.set(t.x, heightAt(t.x, t.z) + t.h * (0.55 + rnd() * 0.35), t.z);
+  addInstanced(branchGeo, lam(0x0f0b12), dead.length * 2, i => {
+    const t = dead[i >> 1];
+    dummy.position.set(t.x, terrain(t.x, t.z) + t.h * (0.55 + rnd() * 0.35), t.z);
     dummy.rotation.set(0, rnd() * 6.28, (rnd() < 0.5 ? -1 : 1) * (0.7 + rnd() * 0.6));
     dummy.scale.set(1, 1.5 + rnd() * 1.8, 1);
   });
 
   // Lápidas (se pueden saltar)
   const graves = [];
-  for (let i = 0; i < 28; i++) {
-    const [x, z] = i < 20 ? scatter(32, -28, 15) : scatter(0, 0, 70);
-    if (Math.hypot(x, z) < 7) continue;
-    graves.push([x, z]);
-    addObs(x, z, 0.6, 1.1);
-  }
-  addInstanced(new THREE.BoxGeometry(0.8, 1.2, 0.2), new THREE.MeshLambertMaterial({ color: 0x3a3a46 }), graves.length, i => {
+  for (let i = 0; i < 26; i++) { const p = pick(25, -52, 16, 2); if (p) { graves.push(p); addObs(p[0], p[1], 0.6, 1.1); } }
+  addInstanced(new THREE.BoxGeometry(0.8, 1.2, 0.2), lam(0x3a3a46), graves.length, i => {
     const [x, z] = graves[i];
-    dummy.position.set(x, heightAt(x, z) + 0.45, z);
+    dummy.position.set(x, terrain(x, z) + 0.45, z);
     dummy.rotation.set((rnd() - 0.5) * 0.3, rnd() * 6.28, (rnd() - 0.5) * 0.3);
   });
 
-  // Rocas
+  // Rocas repartidas
   const rocks = [];
-  for (let i = 0; i < 30; i++) {
-    const [x, z] = scatter(0, 0, MAP);
-    if (Math.hypot(x, z) < 8) continue;
-    const s = 0.7 + rnd() * 1.6;
-    rocks.push([x, z, s]);
-    addObs(x, z, s * 0.9, s * 0.85);
-  }
-  addInstanced(new THREE.DodecahedronGeometry(1, 0), new THREE.MeshLambertMaterial({ color: 0x2a2a34, flatShading: true }), rocks.length, i => {
+  for (let i = 0; i < 40; i++) { const p = pick(0, 0, MAP, 3); if (p) { const s = 0.7 + rnd() * 1.6; rocks.push([p[0], p[1], s]); addObs(p[0], p[1], s * 0.9, s * 0.85); } }
+  addInstanced(new THREE.DodecahedronGeometry(1, 0), lam(0x2a2a34), rocks.length, i => {
     const [x, z, s] = rocks[i];
-    dummy.position.set(x, heightAt(x, z) + s * 0.3, z);
+    dummy.position.set(x, terrain(x, z) + s * 0.3, z);
     dummy.rotation.set(rnd() * 3, rnd() * 3, rnd() * 3);
     dummy.scale.set(s, s * 0.7, s);
   });
 
   // Columnas del templo en ruinas
   const pillars = [];
-  for (let i = 0; i < 9; i++) {
-    const [x, z] = scatter(-32, 38, 11);
-    const h = 1.5 + rnd() * 3.5;
-    pillars.push([x, z, h]);
-    addObs(x, z, 0.9, h);
-  }
+  for (let i = 0; i < 9; i++) { const p = pick(-32, -52, 11, 2.5); if (p) { const h = 1.5 + rnd() * 3.5; pillars.push([p[0], p[1], h]); addObs(p[0], p[1], 0.9, h); } }
   const pillarGeo = new THREE.CylinderGeometry(0.55, 0.65, 1, 6); pillarGeo.translate(0, 0.5, 0);
-  addInstanced(pillarGeo, new THREE.MeshLambertMaterial({ color: 0x4a4854, flatShading: true }), pillars.length, i => {
+  addInstanced(pillarGeo, lam(0x4a4854), pillars.length, i => {
     const [x, z, h] = pillars[i];
-    dummy.position.set(x, heightAt(x, z), z);
+    dummy.position.set(x, terrain(x, z), z);
     dummy.scale.set(1, h, 1);
   });
 
   // Cristales (brillan sin gastar luces)
   const crystals = [];
-  for (let i = 0; i < 16; i++) {
-    const [x, z] = i < 11 ? scatter(40, 40, 13) : scatter(0, 0, 80);
-    crystals.push([x, z, 0.6 + rnd() * 0.9]);
-  }
-  addInstanced(new THREE.OctahedronGeometry(1, 0), new THREE.MeshBasicMaterial({ color: 0x9a5cff }), crystals.length, i => {
+  for (let i = 0; i < 14; i++) { const p = pick(48, 40, 13, 2); if (p) crystals.push([p[0], p[1], 0.6 + rnd() * 0.9]); }
+  addInstanced(new THREE.OctahedronGeometry(1, 0), bas(0x9a5cff), crystals.length, i => {
     const [x, z, s] = crystals[i];
-    dummy.position.set(x, heightAt(x, z) + s * 1.5, z);
+    dummy.position.set(x, terrain(x, z) + s * 1.5, z);
     dummy.rotation.y = rnd() * 3;
     dummy.scale.set(s * 0.6, s * 1.8, s * 0.6);
   });
 
   // ===== ARQUITECTURA SURREALISTA =====
-  // (Todo lo alto y flotante está en el sur, para que la luna del norte quede despejada)
-  const strange = new THREE.MeshLambertMaterial({ color: 0x4a4260, flatShading: true });
-
-  // Monolitos retorcidos e inclinados
+  const strange = lam(0x4a4260);
   const monoGeo = new THREE.BoxGeometry(1.4, 1, 1.4, 1, 12, 1);
   const mp = monoGeo.attributes.position;
   for (let i = 0; i < mp.count; i++) {
-    const t = mp.getY(i) + 0.5;
-    const a = t * 1.6, k = 1 - t * 0.5;
+    const t = mp.getY(i) + 0.5, a = t * 1.6, k = 1 - t * 0.5;
     const x = mp.getX(i) * k, z = mp.getZ(i) * k;
     mp.setX(i, x * Math.cos(a) - z * Math.sin(a));
     mp.setZ(i, x * Math.sin(a) + z * Math.cos(a));
@@ -582,23 +969,18 @@ function buildWorld() {
   monoGeo.translate(0, 0.5, 0);
   monoGeo.computeVertexNormals();
   const monos = [];
-  for (let i = 0; i < 16; i++) {
-    const [x, z] = i < 11 ? scatter(-62, 5, 15) : scatterIn(10, 55, 32, 30);
-    if (Math.hypot(x, z) < 10) continue;
-    monos.push([x, z, 7 + rnd() * 9]);
-    addObs(x, z, 1.1, 99);
-  }
+  for (let i = 0; i < 10; i++) { const p = pick(-40, 30, 14, 3); if (p) { monos.push([p[0], p[1], 7 + rnd() * 9]); addObs(p[0], p[1], 1.1, 99); } }
   addInstanced(monoGeo, strange, monos.length, i => {
     const [x, z, h] = monos[i];
-    dummy.position.set(x, heightAt(x, z) - 0.5, z);
+    dummy.position.set(x, terrain(x, z) - 0.5, z);
     dummy.rotation.set((rnd() - 0.5) * 0.7, rnd() * 6.28, (rnd() - 0.5) * 0.7);
     dummy.scale.set(1, h, 1);
   });
 
-  // Arcos flotantes (se mecen despacio) - solo en el sur
+  // Arcos flotantes (se mecen despacio), en el sureste
   const archGeo = new THREE.TorusGeometry(4, 0.8, 5, 10, Math.PI);
-  for (let i = 0; i < 8; i++) {
-    const [x, z] = scatterIn(0, 62, 26, 36);
+  for (let i = 0; i < 6; i++) {
+    const [x, z] = scatter(62, 60, 22);
     const m = new THREE.Mesh(archGeo, strange);
     m.scale.setScalar(0.8 + rnd() * 1.1);
     m.position.set(x, 7 + rnd() * 9, z);
@@ -607,18 +989,18 @@ function buildWorld() {
     arches.push({ m, y: m.position.y, ph: rnd() * 6.28, ry: m.rotation.y });
   }
 
-  // Rocas invertidas colgando en el aire - solo en el sur
-  const coneGeo = new THREE.ConeGeometry(1, 1, 6); coneGeo.rotateX(Math.PI);
-  addInstanced(coneGeo, new THREE.MeshLambertMaterial({ color: 0x2c2838, flatShading: true }), 9, () => {
-    const [x, z] = scatterIn(0, 60, 30, 32);
+  // Rocas invertidas colgando en el aire
+  const inv = new THREE.ConeGeometry(1, 1, 6); inv.rotateX(Math.PI);
+  addInstanced(inv, lam(0x2c2838), 8, () => {
+    const [x, z] = scatter(62, 60, 28);
     const s = 2 + rnd() * 3;
     dummy.position.set(x, 14 + rnd() * 14, z);
     dummy.rotation.y = rnd() * 6.28;
     dummy.scale.set(s, s * 1.8, s);
   });
 
-  // Escalera en espiral que sube a la nada (con un arco al final), en el este
-  const CX = 62, CZ = 8, R = 6, STEPS = 16;
+  // Escalera en espiral que sube a la nada (con un arco al final)
+  const CX = 88, CZ = 40, R = 6, STEPS = 16;
   addInstanced(new THREE.BoxGeometry(3.2, 0.5, 1.6), strange, STEPS, i => {
     const a = i * 0.38;
     dummy.position.set(CX + Math.cos(a) * R, 4 + i * 0.85, CZ + Math.sin(a) * R);
@@ -630,8 +1012,26 @@ function buildWorld() {
   gate.position.set(CX + Math.cos(la) * R, 4 + (STEPS - 1) * 0.85 + 0.25, CZ + Math.sin(la) * R);
   gate.rotation.y = -la;
   scene.add(gate);
+}
 
-  // ===== MEDIA LUNA VERTICAL CON CARA (solo la parte iluminada) =====
+function buildWorld() {
+  buildGround();
+  buildSigns();
+  buildVillage();
+  buildForest();
+  buildAutumn();
+  buildSnow();
+  buildBridge();
+  buildBoat();
+  buildOddities();
+  buildSky();
+}
+
+// =====================================================
+//  CIELO: media luna, sol y estrellas
+// =====================================================
+function buildSky() {
+  // Media luna vertical con cara (solo la parte iluminada)
   const mc = document.createElement('canvas');
   mc.width = mc.height = 256;
   moonTex = new THREE.CanvasTexture(mc);
@@ -642,15 +1042,32 @@ function buildWorld() {
   moonSprite.renderOrder = 2;
   scene.add(moonSprite);
 
-  // Estrellas
-  const sp = [];
-  for (let i = 0; i < 250; i++) {
+  // Sol rojo oscuro: aparece de vez en cuando y no aclara el cielo
+  const sc = document.createElement('canvas'); sc.width = sc.height = 128;
+  const sg2 = sc.getContext('2d');
+  const sgr = sg2.createRadialGradient(64, 64, 6, 64, 64, 60);
+  sgr.addColorStop(0, '#ffb27a'); sgr.addColorStop(0.55, '#d9532c');
+  sgr.addColorStop(0.62, 'rgba(150,25,50,0.55)'); sgr.addColorStop(1, 'rgba(120,20,60,0)');
+  sg2.fillStyle = sgr; sg2.fillRect(0, 0, 128, 128);
+  sunSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(sc), fog: false, transparent: true, depthWrite: false }));
+  sunSprite.scale.set(38, 38, 1); sunSprite.renderOrder = 2; sunSprite.visible = false;
+  sunGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTex(), color: 0xb01d3a, fog: false, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+  sunGlow.scale.set(95, 95, 1); sunGlow.renderOrder = 1; sunGlow.visible = false;
+  scene.add(sunSprite, sunGlow);
+
+  // Estrellas que parpadean (cada una a su ritmo)
+  const N = 500, sp = new Float32Array(N * 3), sc2 = new Float32Array(N * 3);
+  starPh = []; starSp = [];
+  for (let i = 0; i < N; i++) {
     const u = rnd() * 6.28, v = rnd() * 1.3 + 0.1, r = 160;
-    sp.push(Math.cos(u) * Math.cos(v) * r, Math.sin(v) * r, Math.sin(u) * Math.cos(v) * r);
+    sp[i * 3] = Math.cos(u) * Math.cos(v) * r; sp[i * 3 + 1] = Math.sin(v) * r; sp[i * 3 + 2] = Math.sin(u) * Math.cos(v) * r;
+    starPh.push(rnd() * 6.28); starSp.push(0.8 + rnd() * 2.6);
   }
   const sg = new THREE.BufferGeometry();
-  sg.setAttribute('position', new THREE.Float32BufferAttribute(sp, 3));
-  stars = new THREE.Points(sg, new THREE.PointsMaterial({ color: 0xffffff, size: 1.5, sizeAttenuation: false, fog: false, transparent: true }));
+  sg.setAttribute('position', new THREE.BufferAttribute(sp, 3));
+  sg.setAttribute('color', new THREE.BufferAttribute(sc2, 3));
+  stars = new THREE.Points(sg, new THREE.PointsMaterial({ size: 1.8, sizeAttenuation: false, fog: false, vertexColors: true }));
+  stars.frustumCulled = false;
   scene.add(stars);
 }
 
@@ -767,6 +1184,9 @@ function updateMoon(dt) {
   if (key !== moonKey) { moonKey = key; drawMoon(o, px, 0.6); }
 }
 
+// =====================================================
+//  CABALLERO Y NPCs LOW-POLY
+// =====================================================
 function makeKnight() {
   const g = new THREE.Group();
   const steel = new THREE.MeshLambertMaterial({ color: 0x9096a2 });
@@ -813,18 +1233,6 @@ function makeKnight() {
   cape.rotation.x = 0.12;
   g.add(cape);
   return g;
-}
-
-// =====================================================
-//  NPCs LOW-POLY
-// =====================================================
-function lam(c) { return new THREE.MeshLambertMaterial({ color: c, flatShading: true }); }
-function bas(c) { return new THREE.MeshBasicMaterial({ color: c }); }
-function part(geo, mat, x, y, z, parent) {
-  const m = new THREE.Mesh(geo, mat);
-  m.position.set(x, y, z);
-  parent.add(m);
-  return m;
 }
 
 // Aldeano encapuchado con farol
@@ -921,7 +1329,7 @@ function villagerDialogue() {
 }
 function gnomeDialogue() {
   if (quest === 0) return { lines: ['¡Hi, hi! Un caballero de lata. ¿' + playerName + ', dices? Habla con el aldeano de la capucha, al norte: tiene un encargo para ti.', 'Yo solo cuido mi gorro. Me lo robaron una vez. Una vez fue suficiente.'] };
-  if (quest === 1) return { lines: ['¿Buscas fragmentos, ' + playerName + '? Brillan casi tanto como mi gorro. Casi.', 'Busca columnas de luz celeste. Una entre las tumbas, otra en el templo roto y otra junto a los monolitos retorcidos.'] };
+  if (quest === 1) return { lines: ['¿Buscas fragmentos, ' + playerName + '? Brillan casi tanto como mi gorro. Casi.', 'Sigue los caminos de piedra: una columna está en el bosque encantado, al oeste; otra en el bosque dorado, al este; y la última, en lo alto de la montaña nevada, al sur. Cruza el puente.'] };
   return { lines: ['¡Los has encontrado todos, ' + playerName + '! Yo sabía que lo lograrías. Bueno... en realidad apostaba a que no.'] };
 }
 function goblinDialogue() {
@@ -939,12 +1347,12 @@ function addNPC(mesh, x, z, name, dialogueFn) {
 }
 
 function buildNPCs() {
-  addNPC(makeVillager(), 6, -15, 'Aldeano encapuchado', villagerDialogue);
-  addNPC(makeGnome(), -16, 13, 'Gnomo del gorro rojo', gnomeDialogue);
-  addNPC(makeGoblin(), 19, 15, 'Duende', goblinDialogue);
+  addNPC(makeVillager(), 3, -14, 'Aldeano encapuchado', villagerDialogue);
+  addNPC(makeGnome(), -10, 3, 'Gnomo del gorro rojo', gnomeDialogue);
+  addNPC(makeGoblin(), 14, 5, 'Duende', goblinDialogue);
 
-  // 3 fragmentos de reliquia (columna de luz + cristal flotante). Ocultos hasta aceptar la misión
-  const spots = [[28, -30], [-36, 32], [-58, 2]];
+  // 3 fragmentos de reliquia (columna de luz + cristal flotante): bosque encantado, bosque dorado y montaña
+  const spots = [[-84, 12], [86, -20], [8, 106]];
   const crystalGeo = new THREE.OctahedronGeometry(0.7, 0);
   const beamGeo = new THREE.CylinderGeometry(0.12, 0.45, 18, 8, 1, true);
   for (const [x, z] of spots) {
@@ -1033,11 +1441,87 @@ function updateFragments() {
       frags++;
       if (frags >= 3) {
         quest = 2;
-        say('Los tres fragmentos vibran juntos en tu mano. Vuelve con el aldeano encapuchado, al norte del inicio.', 'Reliquia');
+        say('Los tres fragmentos vibran juntos en tu mano. Vuelve con el aldeano encapuchado, al norte de la aldea.', 'Reliquia');
       } else {
         say('Fragmento de reliquia recogido (' + frags + '/3). Su luz late como un corazón herido.', 'Reliquia');
       }
       updateQuestUI();
+    }
+  }
+}
+
+// =====================================================
+//  CUERVOS CON IA: se posan, esperan, despegan y vuelan alto a otro árbol
+// =====================================================
+function makeCrow() {
+  const g = new THREE.Group();
+  const blk = lam(0x0a0a10), beakM = lam(0x3a3320);
+  const body = part(new THREE.SphereGeometry(0.28, 6, 5), blk, 0, 0, 0, g);
+  body.scale.set(0.8, 0.75, 1.5);
+  const head = part(new THREE.SphereGeometry(0.17, 6, 5), blk, 0, 0.12, 0.38, g);
+  const beak = part(new THREE.ConeGeometry(0.06, 0.26, 4), beakM, 0, 0.1, 0.6, head.parent);
+  beak.rotation.x = Math.PI / 2;
+  part(new THREE.BoxGeometry(0.22, 0.04, 0.4), blk, 0, 0, -0.45, g);
+  const wl = new THREE.Group(), wr = new THREE.Group();
+  wl.position.set(-0.18, 0.08, 0); wr.position.set(0.18, 0.08, 0);
+  part(new THREE.BoxGeometry(0.75, 0.04, 0.38), blk, -0.38, 0, 0, wl);
+  part(new THREE.BoxGeometry(0.75, 0.04, 0.38), blk, 0.38, 0, 0, wr);
+  g.add(wl, wr);
+  g.userData = { wl, wr, head };
+  g.scale.setScalar(1.5);
+  return g;
+}
+function buildCrows() {
+  if (perches.length < 3) return;
+  const used = [];
+  for (let i = 0; i < 5; i++) {
+    let p = perches[(rnd() * perches.length) | 0], tries = 0;
+    while (used.includes(p) && tries++ < 10) p = perches[(rnd() * perches.length) | 0];
+    used.push(p);
+    const m = makeCrow();
+    m.position.set(p.x, p.y + 0.25, p.z);
+    m.rotation.y = rnd() * 6.28;
+    scene.add(m);
+    crows.push({ m, state: 'perch', timer: 3 + rnd() * 10, cur: p, from: p, to: p, t: 0, dur: 1, peak: 12, ph: rnd() * 6 });
+  }
+}
+function updateCrows(dt) {
+  for (const c of crows) {
+    const d = c.m.userData;
+    if (c.state === 'perch') {
+      c.timer -= dt;
+      d.wl.rotation.z = 0.9; d.wr.rotation.z = -0.9;               // alas plegadas
+      d.head.rotation.y = Math.sin(time * 0.7 + c.ph) * 0.5;       // mira a su alrededor
+      if (c.timer <= 0) {
+        let best = null, bd = 0;
+        for (let k = 0; k < 10 && !best; k++) {
+          const p = perches[(Math.random() * perches.length) | 0];
+          const dd = Math.hypot(p.x - c.cur.x, p.z - c.cur.z);
+          if (dd > 25 && dd < 80 && !crows.some(o => o !== c && (o.cur === p || o.to === p))) { best = p; bd = dd; }
+        }
+        if (!best) { c.timer = 3; continue; }
+        c.from = c.cur; c.to = best; c.t = 0; c.dur = Math.max(5, bd / 8); c.peak = 10 + Math.random() * 7;
+        c.state = 'fly';
+        d.head.rotation.y = 0;
+        caw(Math.max(0, 1 - Math.hypot(pos.x - c.from.x, pos.z - c.from.z) / 70));
+      }
+    } else {
+      c.t += dt / c.dur;
+      const t = Math.min(1, c.t), e = t * t * (3 - 2 * t);
+      const x = c.from.x + (c.to.x - c.from.x) * e, z = c.from.z + (c.to.z - c.from.z) * e;
+      const y = c.from.y + (c.to.y - c.from.y) * e + Math.sin(Math.PI * t) * c.peak + 0.25;
+      let a = Math.atan2(c.to.x - c.from.x, c.to.z - c.from.z) - c.m.rotation.y;
+      a = Math.atan2(Math.sin(a), Math.cos(a));
+      c.m.rotation.y += a * Math.min(1, dt * 3);
+      c.m.rotation.x = -0.25 * Math.cos(Math.PI * t);               // sube al despegar, baja al aterrizar
+      const f = Math.sin(time * 16 + c.ph) * 0.8;
+      d.wl.rotation.z = f; d.wr.rotation.z = -f;
+      c.m.position.set(x, y, z);
+      if (c.t >= 1) {
+        c.state = 'perch'; c.cur = c.to; c.timer = 8 + Math.random() * 10; // espera antes de volver a despegar
+        c.m.rotation.x = 0;
+        c.m.position.set(c.to.x, c.to.y + 0.25, c.to.z);
+      }
     }
   }
 }
@@ -1048,9 +1532,9 @@ function initGame() {
 
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x1b0a2e);
-  scene.fog = new THREE.FogExp2(0x1b0a2e, 0.035); // niebla densa
+  scene.fog = new THREE.FogExp2(0x1b0a2e, 0.032); // niebla densa
 
-  camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 300);
+  camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 320);
   clock = new THREE.Clock();
 
   hemi = new THREE.HemisphereLight(0x6a3fb0, 0x050308, 0.7);
@@ -1059,9 +1543,12 @@ function initGame() {
   scene.add(moonLight, moonLight.target);
   torch = new THREE.PointLight(0xff7a2a, 1.2, 18);
   scene.add(torch);
+  fireLight = new THREE.PointLight(0xff8a3a, 0, 24); // una sola luz para la fogata más cercana
+  scene.add(fireLight);
 
   buildWorld();
   buildNPCs();
+  buildCrows();
   knight = makeKnight();
   scene.add(knight);
 
@@ -1073,7 +1560,8 @@ function initGame() {
   animate();
 }
 
-// ---------- CIELO CAMBIANTE + LUNA ----------
+// ---------- CIELO CAMBIANTE, ESTRELLAS Y SOL ----------
+const SUN_START = 50, SUN_PERIOD = 150, SUN_LEN = 48;
 function updateSky() {
   const n = (Math.sin(time * 0.08) + Math.sin(time * 0.035 + 1.3) + Math.sin(time * 0.014 + 4)) / 3;
   const t = Math.max(0, Math.min(1, n * 0.75 + 0.5));
@@ -1083,10 +1571,34 @@ function updateSky() {
   scene.background.copy(skyColor);
   scene.fog.color.copy(skyColor);
   hemi.color.copy(skyColor).offsetHSL(0, 0.1, 0.18);
-  stars.material.opacity = 0.65 + 0.35 * Math.sin(time * 0.6);
+
+  // Estrellas parpadeantes
+  const ca = stars.geometry.attributes.color;
+  for (let k = 0; k < starPh.length; k++) {
+    const b = 0.35 + 0.65 * Math.max(0, Math.sin(time * starSp[k] + starPh[k]));
+    ca.setXYZ(k, b, b * 0.95, b);
+  }
+  ca.needsUpdate = true;
   stars.position.copy(camera.position);
+
   // La luna está fija en el cielo del norte (no gira con la cámara)
   moonSprite.position.set(camera.position.x + 40, camera.position.y + 52, camera.position.z - 170);
+
+  // Sol rojo oscuro: cruza el cielo del sur de vez en cuando (no cambia la luz ni el color del cielo)
+  const ph = time < SUN_START ? -1 : ((time - SUN_START) % SUN_PERIOD) / SUN_LEN;
+  if (ph < 0 || ph > 1) {
+    sunSprite.visible = false; sunGlow.visible = false;
+  } else {
+    const a = ph * Math.PI, fade = Math.min(1, ph / 0.12, (1 - ph) / 0.12);
+    const sx = camera.position.x + Math.cos(a) * 180, sy = camera.position.y + 6 + Math.sin(a) * 72, sz = camera.position.z + 60 + Math.sin(a) * 80;
+    sunSprite.position.set(sx, sy, sz); sunGlow.position.set(sx, sy, sz - 1);
+    sunSprite.material.opacity = 0.9 * fade; sunGlow.material.opacity = 0.28 * fade;
+    sunSprite.visible = true; sunGlow.visible = true;
+    if (!sunSaid && ph > 0.1 && !dlg) {
+      sunSaid = true;
+      say('Un sol rojo como una brasa asoma por el este. No da calor... y el cielo sigue siendo de noche.');
+    }
+  }
 }
 
 function updateArches() {
@@ -1094,6 +1606,33 @@ function updateArches() {
     a.m.position.y = a.y + Math.sin(time * 0.5 + a.ph) * 0.9;
     a.m.rotation.y = a.ry + Math.sin(time * 0.2 + a.ph) * 0.25;
   }
+}
+
+function updateFires() {
+  let nf = null, bd = 1e9;
+  for (const f of fires) {
+    const s = 1 + 0.12 * Math.sin(time * 11 + f.ph) + 0.08 * Math.sin(time * 23 + f.ph * 2);
+    f.f1.scale.set(0.9 + 0.1 * Math.sin(time * 9 + f.ph), s, 0.9 + 0.1 * Math.cos(time * 8 + f.ph));
+    f.f2.scale.set(0.9, s * 1.1, 0.9);
+    f.glow.material.opacity = 0.7 + 0.3 * Math.sin(time * 7 + f.ph);
+    const d = Math.hypot(pos.x - f.x, pos.z - f.z);
+    if (d < bd) { bd = d; nf = f; }
+  }
+  if (nf && bd < 30) {
+    fireLight.position.set(nf.x, nf.y + 1.6, nf.z);
+    fireLight.intensity = Math.max(0, 1 - bd / 30) * 2.4 * (0.85 + 0.15 * Math.sin(time * 13) + 0.08 * Math.sin(time * 29));
+  } else fireLight.intensity = 0;
+}
+
+function updateFireflies() {
+  const pa = fireflies.geometry.attributes.position, ca = fireflies.geometry.attributes.color;
+  for (let i = 0; i < ffBase.length; i++) {
+    const b = ffBase[i], p = ffPh[i];
+    pa.setXYZ(i, b[0] + Math.sin(time * 0.5 + p) * 1.6, b[1] + Math.sin(time * 0.8 + p * 2) * 0.7, b[2] + Math.cos(time * 0.45 + p) * 1.6);
+    const k = 0.25 + 0.75 * Math.max(0, Math.sin(time * 1.7 + p * 3));
+    ca.setXYZ(i, 0.75 * k, 1.0 * k, 0.3 * k);
+  }
+  pa.needsUpdate = true; ca.needsUpdate = true;
 }
 
 // ---------- ACTUALIZAR CADA FRAME ----------
@@ -1111,7 +1650,8 @@ function update(dt) {
   const iz = (keys['w'] ? 1 : 0) - (keys['s'] ? 1 : 0);
   const mx = fx * iz + rx * ix, mz = fz * iz + rz * ix;
   const moving = ix !== 0 || iz !== 0;
-  const speed = keys['shift'] ? 9 : 5;
+  const wading = pos.y < WATER_Y + 0.1;             // dentro del agua se avanza más despacio
+  const speed = (keys['shift'] ? 9 : 5) * (wading ? 0.55 : 1);
 
   if (moving) {
     const len = Math.hypot(mx, mz);
@@ -1127,8 +1667,10 @@ function update(dt) {
 
   // Colisiones (solo con obstáculos más altos que el caballero en ese momento)
   for (const o of obstacles) {
+    const dx = pos.x - o.x, dz = pos.z - o.z;
+    if (dx * dx + dz * dz > 36) continue;
     if (pos.y - o.gy >= o.h) continue;
-    const dx = pos.x - o.x, dz = pos.z - o.z, d = Math.hypot(dx, dz), min = o.r + 0.5;
+    const d = Math.hypot(dx, dz), min = o.r + 0.5;
     if (d < min && d > 0.0001) { pos.x = o.x + dx / d * min; pos.z = o.z + dz / d * min; }
   }
 
@@ -1202,5 +1744,13 @@ function animate() {
   updateSky();
   updateMoon(dt);
   updateArches();
+  updateFires();
+  updateFireflies();
+  updateCrows(dt);
+  if (boat) {
+    boat.position.y = WATER_Y + 0.12 + Math.sin(time * 1.2) * 0.06;
+    boat.rotation.z = Math.sin(time * 0.9) * 0.04;
+    boat.rotation.x = Math.sin(time * 0.7 + 1) * 0.03;
+  }
   renderer.render(scene, camera);
 }
