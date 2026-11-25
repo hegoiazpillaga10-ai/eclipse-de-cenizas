@@ -1,4 +1,18 @@
-const $ = id => document.getElementById(id);
+// ---------- ACCESO SEGURO A LOS ELEMENTOS + COMPROBACIÓN DE IDs ----------
+const REQUIRED_IDS = [
+  'game', 'splash', 'menu', 'options', 'playerName', 'btnPlay', 'btnOptions', 'btnBack',
+  'qLow', 'qMid', 'vol', 'volLabel', 'btnMusic', 'hud', 'quest', 'prompt', 'story', 'storyWho', 'storyText'
+];
+const missingIds = REQUIRED_IDS.filter(id => !document.getElementById(id));
+if (missingIds.length) {
+  console.error('Faltan IDs en index.html:', missingIds.join(', '));
+  const warn = document.createElement('div');
+  warn.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;background:#a00;color:#fff;font:14px sans-serif;padding:8px;text-align:center';
+  warn.textContent = 'Faltan IDs en index.html: ' + missingIds.join(', ') + ' (usa el index.html más reciente y recarga con Ctrl+Shift+R)';
+  document.body.appendChild(warn);
+}
+// Si un ID falta, devuelve un elemento vacío en vez de romper el juego
+const $ = id => document.getElementById(id) || document.createElement('div');
 
 // ---------- PANTALLAS ----------
 const screens = ['menu', 'options'];
@@ -17,6 +31,18 @@ function show(id) {
 const settings = { quality: 'mid' };
 let playing = false, started = false;
 
+// ---------- NOMBRE Y VOLUMEN (se guardan en el navegador) ----------
+let playerName = 'Caballero';
+let masterVol = 0.7;
+try {
+  const n = localStorage.getItem('ayu_name');
+  if (n) $('playerName').value = n;
+  const v = localStorage.getItem('ayu_vol');
+  if (v !== null && !isNaN(parseFloat(v))) masterVol = Math.max(0, Math.min(1, parseFloat(v)));
+} catch (e) {}
+$('vol').value = Math.round(masterVol * 100);
+$('volLabel').textContent = 'Volumen general: ' + Math.round(masterVol * 100) + '%';
+
 // Secuencia: cartel AyuCreations -> menú principal
 let stage = 'splash';
 function endSplash() {
@@ -31,7 +57,7 @@ function endSplash() {
     $('btnMusic').classList.remove('hidden');
   }, 900);
 }
-setTimeout(endSplash, 3500);
+setTimeout(endSplash, 3000);
 $('splash').addEventListener('click', endSplash);
 window.addEventListener('keydown', () => { if (stage === 'splash') endSplash(); });
 
@@ -46,12 +72,35 @@ function applyQuality() {
   if (grass) grass.count = settings.quality === 'low' ? 1000 : 2400;
 }
 
+// Instrucciones (arriba izquierda): visibles unos segundos
+let hudTimer = null;
+function showHud() {
+  $('hud').classList.remove('faded');
+  clearTimeout(hudTimer);
+  hudTimer = setTimeout(() => $('hud').classList.add('faded'), 10000);
+}
+// H: vuelve a mostrar las instrucciones y el último texto del narrador
+function showHelp() {
+  showHud();
+  if (!dlg) {
+    $('story').classList.remove('faded');
+    clearTimeout(fadeTimer);
+    fadeTimer = setTimeout(() => $('story').classList.add('faded'), 8000);
+  }
+}
+
 let musicAutoStarted = false;
 function startPlaying() {
+  // Nombre del jugador
+  playerName = $('playerName').value.trim() || 'Caballero';
+  try { localStorage.setItem('ayu_name', $('playerName').value.trim()); } catch (e) {}
+
   show(null);
   if (document.activeElement) document.activeElement.blur();
+  for (const k in keys) keys[k] = false;
   $('hud').classList.remove('hidden');
   $('story').classList.remove('hidden');
+  showHud();
   if (quest > 0) $('quest').classList.remove('hidden');
 
   // La música arranca en el momento exacto de pulsar Jugar (la primera vez)
@@ -60,7 +109,7 @@ function startPlaying() {
   if (!started) {
     initGame();
     started = true;
-    say('Despiertas entre cenizas frías. El aire huele a hierro y a tumba. Al norte, un farol naranja arde junto a una figura encapuchada. Camina.');
+    say('Despiertas entre cenizas frías, ' + playerName + '. El aire huele a hierro y a tumba. Al norte, un farol naranja arde junto a una figura encapuchada. Camina.');
   }
   applyQuality();
   playing = true;
@@ -85,13 +134,25 @@ $('btnBack').onclick = () => show('menu');
 $('qLow').onclick = () => { settings.quality = 'low'; updateUI(); applyQuality(); };
 $('qMid').onclick = () => { settings.quality = 'mid'; updateUI(); applyQuality(); };
 
+// Deslizador de volumen general (afecta a toda la música Web Audio)
+$('vol').addEventListener('input', e => {
+  masterVol = e.target.value / 100;
+  $('volLabel').textContent = 'Volumen general: ' + e.target.value + '%';
+  try { localStorage.setItem('ayu_vol', String(masterVol)); } catch (err) {}
+  if (actx && musicOn && master) {
+    master.gain.cancelScheduledValues(actx.currentTime);
+    master.gain.setTargetAtTime(targetVol(), actx.currentTime, 0.1);
+  }
+});
+
 // =====================================================
 //  MÚSICA DARK FANTASY (Web Audio API, sin archivos)
 // =====================================================
 let actx = null, master = null, bus = null, musicOn = false, musicTimer = null;
 let drone1 = null, drone2 = null;
 let trackIdx = 0, chordIdx = 0, nextChordT = 0, nextBellT = 0;
-const MUSIC_VOL = 0.5;
+const MUSIC_VOL = 0.6;
+const targetVol = () => MUSIC_VOL * masterVol;
 const mtof = m => 440 * Math.pow(2, (m - 69) / 12);
 
 // Playlist: cada tema tiene tonalidad, acordes (en semitonos desde la raíz) y escala para las campanas
@@ -216,7 +277,7 @@ function setMusic(on) {
       musicTimer = setInterval(scheduleMusic, 400);
     }
     master.gain.cancelScheduledValues(actx.currentTime);
-    master.gain.setTargetAtTime(MUSIC_VOL, actx.currentTime, 0.8);
+    master.gain.setTargetAtTime(targetVol(), actx.currentTime, 0.8);
   } else {
     if (actx) {
       master.gain.cancelScheduledValues(actx.currentTime);
@@ -249,7 +310,8 @@ function say(text, who = 'Narrador', keep = false) {
     if (i >= text.length) {
       clearInterval(typeTimer);
       typing = false;
-      if (!keep) fadeTimer = setTimeout(() => $('story').classList.add('faded'), 9000);
+      // El texto se oculta solo (salvo durante un diálogo)
+      if (!keep) fadeTimer = setTimeout(() => $('story').classList.add('faded'), 8000);
     }
   }, 28);
 }
@@ -270,6 +332,7 @@ window.addEventListener('keydown', e => {
   if (!playing) return;
   if (k === 'escape' || k === 'p') pause();
   if (k === 'e' && !e.repeat) interact();
+  if (k === 'h' && !e.repeat) showHelp();
   if (k === ' ' || k.startsWith('arrow')) e.preventDefault();
 });
 window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
@@ -301,7 +364,7 @@ $('game').addEventListener('click', () => {
 // ---------- VARIABLES DEL MUNDO ----------
 let renderer, scene, camera, clock, knight, legL, legR, armL, armR;
 let hemi, moonLight, torch, grass;
-let moonSprite, moonGlow, stars, moonTex;
+let moonSprite, stars, moonTex;
 let time = 0, walkT = 0, walkAmp = 0, air = 0, knightYaw = Math.PI;
 let vy = 0, onGround = true, jumpSaid = false, moonSaid = false;
 const pos = new THREE.Vector3(0, 0, 0);
@@ -568,27 +631,16 @@ function buildWorld() {
   gate.rotation.y = -la;
   scene.add(gate);
 
-  // ===== MEDIA LUNA CON CARA =====
+  // ===== MEDIA LUNA VERTICAL CON CARA (solo la parte iluminada) =====
   const mc = document.createElement('canvas');
   mc.width = mc.height = 256;
   moonTex = new THREE.CanvasTexture(mc);
   moonTex.userData = { c: mc.getContext('2d') };
-  drawMoon(1, -0.6, 0.9);
-  moonSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: moonTex, fog: false, transparent: true, depthWrite: false, rotation: 0.3 }));
-  moonSprite.scale.set(46, 46, 1);
+  drawMoon(1, 0.6, 0.6);
+  moonSprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: moonTex, fog: false, transparent: true, depthWrite: false }));
+  moonSprite.scale.set(56, 56, 1);
   moonSprite.renderOrder = 2;
-
-  const gc = document.createElement('canvas');
-  gc.width = gc.height = 128;
-  const g2 = gc.getContext('2d');
-  const gr = g2.createRadialGradient(64, 64, 14, 64, 64, 64);
-  gr.addColorStop(0, 'rgba(190,170,255,0.4)');
-  gr.addColorStop(1, 'rgba(190,170,255,0)');
-  g2.fillStyle = gr; g2.fillRect(0, 0, 128, 128);
-  moonGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(gc), fog: false, transparent: true, depthWrite: false }));
-  moonGlow.scale.set(100, 100, 1);
-  moonGlow.renderOrder = 1;
-  scene.add(moonGlow, moonSprite);
+  scene.add(moonSprite);
 
   // Estrellas
   const sp = [];
@@ -602,7 +654,8 @@ function buildWorld() {
   scene.add(stars);
 }
 
-// Dibuja la media luna: open = 1 (ojos abiertos) a 0 (cerrados); px/py = hacia dónde miran
+// Dibuja la media luna vertical (curva a la izquierda, sin círculo oscuro detrás).
+// open = 1 (ojos abiertos) a 0 (cerrados); px/py = hacia dónde miran las pupilas
 function drawMoon(open, px, py) {
   const c = moonTex.userData.c;
   c.setTransform(1, 0, 0, 1, 0, 0);
@@ -610,54 +663,55 @@ function drawMoon(open, px, py) {
   c.shadowBlur = 0;
   c.clearRect(0, 0, 256, 256);
 
-  // Disco base pálido
-  const g = c.createRadialGradient(110, 175, 10, 128, 150, 125);
-  g.addColorStop(0, '#f6f3ff'); g.addColorStop(0.65, '#cfc6ee'); g.addColorStop(1, '#8f84c4');
+  // Cuerpo: círculo grande con un leve resplandor
+  const g = c.createLinearGradient(16, 0, 100, 0);
+  g.addColorStop(0, '#fbf8ff'); g.addColorStop(0.55, '#dcd3f5'); g.addColorStop(1, '#a99ede');
+  c.save();
+  c.shadowColor = 'rgba(190,175,255,0.9)'; c.shadowBlur = 14;
   c.fillStyle = g;
-  c.beginPath(); c.arc(128, 128, 122, 0, Math.PI * 2); c.fill();
+  c.beginPath(); c.arc(138, 128, 122, 0, Math.PI * 2); c.fill();
+  c.restore();
 
   // Cráteres
   c.fillStyle = 'rgba(80,70,130,0.22)';
-  [[40, 176, 10], [216, 178, 12], [60, 226, 8], [198, 228, 8], [30, 130, 7]].forEach(([x, y, r]) => {
+  [[32, 92, 5], [34, 192, 7], [74, 44, 5], [72, 214, 5]].forEach(([x, y, r]) => {
     c.beginPath(); c.arc(x, y, r, 0, 6.283); c.fill();
   });
 
-  // Recorte: queda una media luna con los cuernos hacia arriba
+  // Recorte: solo queda la media luna iluminada (vertical, con la curva hacia la izquierda)
   c.globalCompositeOperation = 'destination-out';
-  c.beginPath(); c.arc(128, 44, 108, 0, 6.283); c.fill();
+  c.beginPath(); c.arc(198, 128, 100, 0, 6.283); c.fill();
 
-  // Borde plateado en el filo interior (solo sobre lo ya dibujado)
+  // Filo plateado en el borde interior
   c.globalCompositeOperation = 'source-atop';
-  c.strokeStyle = 'rgba(210,222,255,0.7)'; c.lineWidth = 4;
-  c.beginPath(); c.arc(128, 44, 108, 0, 6.283); c.stroke();
+  c.strokeStyle = 'rgba(225,235,255,0.85)'; c.lineWidth = 4;
+  c.beginPath(); c.arc(198, 128, 100, 0, 6.283); c.stroke();
   c.globalCompositeOperation = 'source-over';
 
   // Cejas enfadadas
-  c.strokeStyle = '#1a0830'; c.lineWidth = 6; c.lineCap = 'round';
-  c.beginPath(); c.moveTo(64, 152); c.lineTo(104, 165); c.stroke();
-  c.beginPath(); c.moveTo(192, 152); c.lineTo(152, 165); c.stroke();
+  c.strokeStyle = '#1a0830'; c.lineWidth = 5; c.lineCap = 'round';
+  c.beginPath(); c.moveTo(35, 92); c.lineTo(58, 100); c.stroke();
+  c.beginPath(); c.moveTo(91, 92); c.lineTo(68, 100); c.stroke();
 
-  // Ojos plateados brillantes
-  for (const ex of [82, 174]) {
+  // Ojos plateados muy brillantes
+  for (const ex of [48, 78]) {
     c.fillStyle = '#0c0318';
-    c.beginPath(); c.ellipse(ex, 180, 24, 15, 0, 0, 6.283); c.fill();
-    const ry = 12 * open;
-    if (ry > 1) {
-      // halo
+    c.beginPath(); c.ellipse(ex, 113, 14, 11, 0, 0, 6.283); c.fill();
+    const ry = 10 * open;
+    if (ry > 0.8) {
       c.save();
-      c.shadowColor = '#c8dcff'; c.shadowBlur = 18;
-      c.fillStyle = '#e6eeff';
-      c.beginPath(); c.ellipse(ex, 180, 19, ry, 0, 0, 6.283); c.fill();
+      c.shadowColor = '#e6f0ff'; c.shadowBlur = 24;
+      c.fillStyle = '#ffffff';
+      c.beginPath(); c.ellipse(ex, 113, 11, ry, 0, 0, 6.283); c.fill();
       c.restore();
-      // metal
       c.save();
-      c.beginPath(); c.ellipse(ex, 180, 19, ry, 0, 0, 6.283); c.clip();
-      const mg = c.createLinearGradient(ex - 20, 180 - ry, ex + 20, 180 + ry);
-      mg.addColorStop(0, '#ffffff'); mg.addColorStop(0.45, '#b4c0da');
-      mg.addColorStop(0.6, '#f4f8ff'); mg.addColorStop(1, '#8c9dbf');
-      c.fillStyle = mg; c.fillRect(ex - 22, 180 - 14, 44, 28);
+      c.beginPath(); c.ellipse(ex, 113, 11, ry, 0, 0, 6.283); c.clip();
+      const mg = c.createLinearGradient(ex - 11, 113 - ry, ex + 11, 113 + ry);
+      mg.addColorStop(0, '#ffffff'); mg.addColorStop(0.45, '#c2cee6');
+      mg.addColorStop(0.6, '#ffffff'); mg.addColorStop(1, '#9eb0d0');
+      c.fillStyle = mg; c.fillRect(ex - 13, 113 - 12, 26, 24);
       c.fillStyle = '#0a0010';
-      c.beginPath(); c.ellipse(ex + px * 7, 180 + py * 4, 3.5, 9, 0, 0, 6.283); c.fill();
+      c.beginPath(); c.ellipse(ex + px * 3, 113 + py * 2, 2.4, 6, 0, 0, 6.283); c.fill();
       c.restore();
     }
   }
@@ -665,28 +719,27 @@ function drawMoon(open, px, py) {
   // Boca sonriente
   c.fillStyle = '#12031d';
   c.beginPath();
-  c.moveTo(80, 200);
-  c.quadraticCurveTo(128, 224, 176, 200);
-  c.quadraticCurveTo(128, 270, 80, 200);
+  c.moveTo(36, 152);
+  c.quadraticCurveTo(63, 172, 90, 152);
+  c.quadraticCurveTo(63, 208, 36, 152);
   c.fill();
 
-  // Dientes afilados plateados (arriba y abajo)
+  // Dientes afilados plateados y muy brillantes (arriba y abajo)
   c.save();
-  c.shadowColor = '#c8dcff'; c.shadowBlur = 8;
-  const tg = c.createLinearGradient(0, 200, 0, 240);
-  tg.addColorStop(0, '#ffffff'); tg.addColorStop(1, '#9fb0cc');
+  c.shadowColor = '#eaf2ff'; c.shadowBlur = 14;
+  const tg = c.createLinearGradient(0, 150, 0, 185);
+  tg.addColorStop(0, '#ffffff'); tg.addColorStop(1, '#b4c4e0');
   c.fillStyle = tg;
   c.beginPath();
-  const n = 9;
-  for (let k = 0; k < n; k++) {
-    const t = (k + 1) / (n + 1);
-    const x = 80 + 96 * t, y = 200 + 48 * t * (1 - t), h = 6 + 8 * Math.sin(Math.PI * t);
-    c.moveTo(x - 4, y); c.lineTo(x + 4, y); c.lineTo(x, y + h);
+  for (let k = 0; k < 5; k++) {
+    const t = (k + 1) / 6;
+    const x = 36 + 54 * t, y = 152 + 40 * t * (1 - t);
+    c.moveTo(x - 4.5, y); c.lineTo(x + 4.5, y); c.lineTo(x, y + 8);
   }
-  for (let k = 0; k < n - 1; k++) {
-    const t = (k + 1.5) / (n + 1);
-    const x = 80 + 96 * t, y = 200 + 140 * t * (1 - t), h = 5 + 6 * Math.sin(Math.PI * t);
-    c.moveTo(x - 4, y); c.lineTo(x + 4, y); c.lineTo(x, y - h);
+  for (let k = 0; k < 4; k++) {
+    const t = (k + 1.5) / 6;
+    const x = 36 + 54 * t, y = 152 + 112 * t * (1 - t);
+    c.moveTo(x - 4.5, y); c.lineTo(x + 4.5, y); c.lineTo(x, y - 7);
   }
   c.fill();
   c.restore();
@@ -709,10 +762,9 @@ function updateMoon(dt) {
     }
   }
   const o = Math.round(moonOpen * 5) / 5;
-  const px = Math.round((-0.6 + Math.sin(time * 0.3) * 0.4) * 4) / 4; // mira hacia abajo, hacia el mapa
+  const px = Math.round((0.6 + Math.sin(time * 0.3) * 0.4) * 4) / 4; // mira hacia el mapa
   const key = o + '|' + px;
-  if (key !== moonKey) { moonKey = key; drawMoon(o, px, 0.9); }
-  moonGlow.material.opacity = 0.8 + 0.2 * Math.sin(time * 1.3);
+  if (key !== moonKey) { moonKey = key; drawMoon(o, px, 0.6); }
 }
 
 function makeKnight() {
@@ -847,35 +899,35 @@ function makeGoblin() {
   return g;
 }
 
-// Diálogos de cada NPC (cambian según el estado de la misión)
+// Diálogos de cada NPC (cambian según el estado de la misión y usan el nombre del jugador)
 function villagerDialogue() {
   if (quest === 0) return {
     lines: [
-      'Chist... acércate, caballero. Pocos caminan por estas tierras, y menos aún sobreviven.',
+      'Chist... acércate, ' + playerName + '. Pocos caminan por estas tierras, y menos aún sobreviven.',
       'La Reliquia del Eclipse se hizo pedazos cuando el sol murió. Tres fragmentos aún laten bajo este cielo morado.',
-      'Tráemelos. Verás su luz celeste alzarse entre la niebla, como columnas. Y cuidado con lo que te mira desde arriba.'
+      'Tráemelos, ' + playerName + '. Verás su luz celeste alzarse entre la niebla, como columnas. Y cuidado con lo que te mira desde arriba.'
     ],
     after: () => { quest = 1; fragments.forEach(f => f.g.visible = true); updateQuestUI(); }
   };
-  if (quest === 1) return { lines: ['Aún faltan fragmentos... ¿Ves las columnas de luz celeste? Sigue su resplandor. Son ' + (3 - frags) + ' los que faltan.'] };
+  if (quest === 1) return { lines: ['Aún faltan fragmentos, ' + playerName + '... ¿Ves las columnas de luz celeste? Sigue su resplandor. Son ' + (3 - frags) + ' los que faltan.'] };
   if (quest === 2) return {
     lines: [
       'Los tienes... los tres. Su luz casi quema.',
-      'Gracias, caballero sin nombre. Esto es solo el principio: la reliquia pide algo más que fragmentos. Pero esa es otra historia.'
+      'Gracias, ' + playerName + '. Esto es solo el principio: la reliquia pide algo más que fragmentos. Pero esa es otra historia.'
     ],
     after: () => { quest = 3; updateQuestUI(); }
   };
-  return { lines: ['La reliquia duerme por ahora. Pero la luna sigue mirando... y sigue sonriendo.'] };
+  return { lines: ['La reliquia duerme por ahora, ' + playerName + '. Pero la luna sigue mirando... y sigue sonriendo.'] };
 }
 function gnomeDialogue() {
-  if (quest === 0) return { lines: ['¡Hi, hi! Un caballero de lata. Habla con el aldeano de la capucha, al norte: tiene un encargo para ti.', 'Yo solo cuido mi gorro. Me lo robaron una vez. Una vez fue suficiente.'] };
-  if (quest === 1) return { lines: ['¿Buscas fragmentos? Brillan casi tanto como mi gorro. Casi.', 'Busca columnas de luz celeste. Una entre las tumbas, otra en el templo roto y otra junto a los monolitos retorcidos.'] };
-  return { lines: ['¡Los has encontrado todos! Yo sabía que lo lograrías. Bueno... en realidad apostaba a que no.'] };
+  if (quest === 0) return { lines: ['¡Hi, hi! Un caballero de lata. ¿' + playerName + ', dices? Habla con el aldeano de la capucha, al norte: tiene un encargo para ti.', 'Yo solo cuido mi gorro. Me lo robaron una vez. Una vez fue suficiente.'] };
+  if (quest === 1) return { lines: ['¿Buscas fragmentos, ' + playerName + '? Brillan casi tanto como mi gorro. Casi.', 'Busca columnas de luz celeste. Una entre las tumbas, otra en el templo roto y otra junto a los monolitos retorcidos.'] };
+  return { lines: ['¡Los has encontrado todos, ' + playerName + '! Yo sabía que lo lograrías. Bueno... en realidad apostaba a que no.'] };
 }
 function goblinDialogue() {
-  if (quest === 0) return { lines: ['¡Shhh! ¡Tú! Sí, tú, lata andante. ¿Tienes monedas? ¿No? Qué lástima.', 'Hay un aldeano al norte que busca héroes. Yo busco cosas brillantes. Quizá podamos... no.'] };
-  if (quest === 1) return { lines: ['¿Fragmentos? Yo toqué uno una vez. Me quemó los dedos. ¡Nunca más!', 'Consejo gratis: no los dejes para la noche. Aquí siempre es de noche. ¡Ja, ja!'] };
-  return { lines: ['Tienes los tres... ¿seguro que no sobra uno para el pobre duende? ¿No? Vale, vale.'] };
+  if (quest === 0) return { lines: ['¡Shhh! ¡Tú! Sí, tú, lata andante. ¿Tienes monedas, ' + playerName + '? ¿No? Qué lástima.', 'Hay un aldeano al norte que busca héroes. Yo busco cosas brillantes. Quizá podamos... no.'] };
+  if (quest === 1) return { lines: ['¿Fragmentos? Yo toqué uno una vez. Me quemó los dedos. ¡Nunca más!', 'Consejo gratis, ' + playerName + ': no los dejes para la noche. Aquí siempre es de noche. ¡Ja, ja!'] };
+  return { lines: ['Tienes los tres... ¿seguro que no sobra uno para el pobre duende, ' + playerName + '? ¿No? Vale, vale.'] };
 }
 
 function addNPC(mesh, x, z, name, dialogueFn) {
@@ -930,7 +982,7 @@ function closeDialogue(runAfter) {
   const a = dlg.after;
   dlg = null;
   clearTimeout(fadeTimer);
-  fadeTimer = setTimeout(() => $('story').classList.add('faded'), 6000);
+  fadeTimer = setTimeout(() => $('story').classList.add('faded'), 5000);
   if (runAfter && a) a();
 }
 
@@ -1034,8 +1086,7 @@ function updateSky() {
   stars.material.opacity = 0.65 + 0.35 * Math.sin(time * 0.6);
   stars.position.copy(camera.position);
   // La luna está fija en el cielo del norte (no gira con la cámara)
-  moonSprite.position.set(camera.position.x + 28, camera.position.y + 52, camera.position.z - 170);
-  moonGlow.position.set(camera.position.x + 28, camera.position.y + 52, camera.position.z - 172);
+  moonSprite.position.set(camera.position.x + 40, camera.position.y + 52, camera.position.z - 170);
 }
 
 function updateArches() {
