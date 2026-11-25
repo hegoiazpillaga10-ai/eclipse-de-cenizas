@@ -22,7 +22,6 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: #000; font-f
 }
 #splash.fadeout { opacity: 0; pointer-events: none; }
 
-/* Luz cálida de antorcha que parpadea */
 .splash-glow {
   position: absolute; left: 50%; top: 50%;
   width: 130vmax; height: 130vmax; transform: translate(-50%, -50%);
@@ -133,18 +132,33 @@ button:hover { background: #3a1666; box-shadow: 0 0 18px #7a2cff; }
 button.active { background: #4a1d8a; border-color: #b98cff; }
 .row { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; }
 
+/* Casilla del nombre */
+#playerName {
+  font-family: inherit; font-size: 1.05rem; letter-spacing: 2px; text-align: center;
+  color: #efe6ff; background: rgba(10,4,20,.85);
+  border: 1px solid #6b3fb0; border-bottom: 2px solid #b98cff;
+  padding: 12px 18px; width: 300px; max-width: 86vw; outline: none;
+}
+#playerName::placeholder { color: #8d7cae; }
+#playerName:focus { box-shadow: 0 0 18px rgba(122,44,255,.6); }
+
+/* Deslizador de volumen */
+input[type=range] { width: 280px; max-width: 80vw; accent-color: #b98cff; cursor: pointer; }
+#volLabel { margin: 4px 0 0; }
+
 /* Botón de música (arriba a la derecha) */
 #btnMusic {
   position: fixed; top: 10px; right: 10px; z-index: 40;
   min-width: 0; padding: 8px 14px; font-size: .8rem; letter-spacing: 1px;
 }
 
-/* pointer-events: none para que los clics lleguen al juego */
+/* Instrucciones: se desvanecen solas (H para volver a verlas) */
 #hud {
   position: fixed; top: 10px; left: 10px; z-index: 5; font-size: .75rem;
   background: rgba(0,0,0,.45); padding: 8px 12px; border-left: 2px solid #7a2cff; line-height: 1.5;
-  pointer-events: none;
+  pointer-events: none; transition: opacity 1s;
 }
+#hud.faded { opacity: 0; }
 
 /* Contador de misión */
 #quest {
@@ -163,12 +177,13 @@ button.active { background: #4a1d8a; border-color: #b98cff; }
   box-shadow: 0 0 16px rgba(122,44,255,.5);
 }
 
+/* Cuadro del narrador: se desvanece solo (H para volver a verlo) */
 #story {
   position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
   width: min(720px, 92vw); z-index: 5; pointer-events: none;
   background: rgba(8,3,16,.82); border: 1px solid #6b3fb0; border-top: 2px solid #b98cff;
-  padding: 12px 18px; min-height: 90px; transition: opacity 1.5s;
+  padding: 12px 18px; min-height: 90px; transition: opacity 1.2s;
 }
-#story.faded { opacity: .35; }
+#story.faded { opacity: 0; }
 #story .who { font-size: .75rem; color: #b98cff; letter-spacing: 3px; margin-bottom: 6px; text-transform: uppercase; }
 #story p { margin: 0; font-size: 1rem; line-height: 1.5; font-family: Georgia, serif; font-style: italic; }
