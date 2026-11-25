@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Eclipse de Cenizas</title>
-  <link rel="stylesheet" href="style.css?v=4">
+  <link rel="stylesheet" href="style.css?v=5">
 </head>
 <body>
 
@@ -33,6 +33,7 @@
   <!-- 2) MENÚ y OPCIONES: ocultos al inicio -->
   <div id="menu" class="screen hidden" style="display:none">
     <h1 class="title">ECLIPSE DE CENIZAS</h1>
+    <input id="playerName" type="text" maxlength="16" placeholder="Inserte su nombre..." autocomplete="off" spellcheck="false">
     <button id="btnPlay">Jugar</button>
     <button id="btnOptions">Opciones</button>
   </div>
@@ -44,6 +45,8 @@
       <button id="qLow">Baja</button>
       <button id="qMid" class="active">Media</button>
     </div>
+    <p id="volLabel">Volumen general: 70%</p>
+    <input id="vol" type="range" min="0" max="100" value="70">
     <button id="btnBack">Volver</button>
   </div>
 
@@ -52,7 +55,7 @@
   <div id="hud" class="hidden">
     WASD: moverse (hacia donde mira la cámara) · Shift: correr · Espacio: saltar · E: hablar<br>
     Ratón: clic para capturarlo y girar la cámara (o mantén pulsado y arrastra)<br>
-    Flechas ← →: girar cámara · P: pausa
+    Flechas ← →: girar cámara · P: pausa · H: mostrar ayuda
   </div>
 
   <div id="quest" class="hidden"></div>
@@ -64,6 +67,6 @@
   </div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-  <script src="script.js?v=4"></script>
+  <script src="script.js?v=5"></script>
 </body>
 </html>
